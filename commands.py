@@ -157,6 +157,7 @@ class PersistentControlPanel(discord.ui.View):
         vc = interaction.guild.voice_client
         
         if vc and vc.is_playing():
+            logger.info(f"User '{interaction.user}' skipped track via control panel in guild '{interaction.guild.name}'.")
             vc.stop()
             await interaction.response.send_message("⏭️ Skipped!", ephemeral=True)
         else:
@@ -169,6 +170,7 @@ class PersistentControlPanel(discord.ui.View):
         state = get_guild_state(self.guild_id)
         
         if vc:
+            logger.info(f"User '{interaction.user}' stopped playback via control panel in guild '{interaction.guild.name}'.")
             vc.stop()
             state.queue.clear()
             state.current_track = None
@@ -576,6 +578,7 @@ def setup_all_commands(bot):
     @bot.slash_command(name="p", description="Play audio from YouTube or search query")
     @option("query", description="YouTube URL or search terms", required=True)
     async def play(ctx: discord.ApplicationContext, query: str):
+        logger.info(f"User '{ctx.author}' in guild '{ctx.guild.name}' initiated /play with query: '{query}'")
         await ctx.defer()
         
         if not ctx.author.voice:
@@ -586,6 +589,7 @@ def setup_all_commands(bot):
         try:
             vc = ctx.voice_client or await channel.connect()
             if vc.channel != channel:
+                logger.info(f"Moving to voice channel '{channel.name}' in guild '{ctx.guild.name}'.")
                 await vc.move_to(channel)
         except Exception as e:
             await ctx.followup.send(f"❌ Failed to join voice: {e}")
@@ -611,6 +615,8 @@ def setup_all_commands(bot):
         needs_display = not state.current_track and not state.queue
         
         state.queue.append(track)
+
+        logger.info(f"Added '{track.title}' to the queue for guild '{ctx.guild.name}'. Queue size: {len(state.queue)}.")
         
        # Show queue position with auto-delete
         position = len(state.queue)
@@ -747,6 +753,7 @@ def setup_all_commands(bot):
     @bot.slash_command(name="skip", description="Skip the current track")
     @bot.slash_command(name="s", description="Skip the current track")
     async def skip(ctx: discord.ApplicationContext):
+        logger.info(f"User '{ctx.author}' in guild '{ctx.guild.name}' initiated /skip.")
         vc = ctx.voice_client
         if vc and vc.is_playing():
             vc.stop()
@@ -766,25 +773,10 @@ def setup_all_commands(bot):
         else:
             await ctx.respond("❌ Queue is already empty.", ephemeral=True, delete_after=3)
     
-    @bot.slash_command(name="stop", description="Stop playback and clear queue")
-    async def stop(ctx: discord.ApplicationContext):
-        vc = ctx.voice_client
-        state = get_guild_state(ctx.guild.id)
-        
-        if vc:
-            vc.stop()
-            state.queue.clear()
-            state.current_track = None
-            state.is_playing = False
-            state.volume_transformer = None
-            await ctx.respond("⏹️ Stopped playback and cleared queue!", delete_after=3)
-            await update_display_for_guild(ctx.guild.id)
-        else:
-            await ctx.respond("❌ Nothing is playing.", ephemeral=True, delete_after=3)
-    
     @bot.slash_command(name="disconnect", description="Disconnect from voice channel")
     @bot.slash_command(name="dc", description="Disconnect from voice channel")
     async def disconnect(ctx: discord.ApplicationContext):
+        logger.info(f"User '{ctx.author}' in guild '{ctx.guild.name}' initiated /disconnect.")
         vc = ctx.voice_client
         if vc:
             await vc.disconnect()

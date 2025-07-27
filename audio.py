@@ -212,9 +212,7 @@ async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'commands.Bot')
                 '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
                 '-nostdin'
             ),
-            'options': (
-                '-vn -ar 48000 -ac 2 -b:a 128k'
-            )
+            'options': '-vn -b:a 128k'
         }
         
         # Create base audio source

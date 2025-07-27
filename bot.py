@@ -17,6 +17,7 @@ logging.basicConfig(
         logging.FileHandler('bot.log', encoding='utf-8', mode='a')
     ]
 )
+logging.getLogger('discord.player').setLevel(logging.WARNING) # Set discord player logs to WARNING to reduce noise
 logger = logging.getLogger(__name__)
 
 if not TOKEN:
