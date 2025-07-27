@@ -119,7 +119,7 @@ async def fetch_track_info(query: str, requester: str = None) -> Track:
         logger.debug(f"Info fetch failed for {query}: {str(e)[:100]}")        
         return Track(url=query, title=query, requester=requester)
 
-async def play_next(guild_id: int, vc: discord.VoiceClient, bot: commands.Bot):
+async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'commands.Bot'):
     """Enhanced play_next with real-time volume control"""
     state = get_guild_state(guild_id)
     
