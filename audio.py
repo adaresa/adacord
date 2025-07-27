@@ -22,6 +22,7 @@ class Track:
 @dataclass
 class GuildState:
     queue: deque
+    text_channel: Optional[discord.TextChannel] = None
     current_track: Optional[Track] = None
     is_playing: bool = False
     is_paused: bool = False
@@ -118,9 +119,8 @@ async def fetch_track_info(query: str, requester: str = None) -> Track:
         logger.debug(f"Info fetch failed for {query}: {str(e)[:100]}")        
         return Track(url=query, title=query, requester=requester)
 
-async def play_next(ctx, vc, bot):
+async def play_next(guild_id: int, vc: discord.VoiceClient, bot: commands.Bot):
     """Enhanced play_next with real-time volume control"""
-    guild_id = ctx.guild.id
     state = get_guild_state(guild_id)
     
     # Import here to avoid circular import
@@ -171,13 +171,14 @@ async def play_next(ctx, vc, bot):
         stream_url = await extractor.get_stream_url(next_track.url)
         next_track.stream_url = stream_url
         
-        await ctx.send_followup(f"🎵 Now playing: **{next_track.title}**", delete_after=3)
+        if state.text_channel:
+            await state.text_channel.send(f"🎵 Now playing: **{next_track.title}**", delete_after=2)
         
     except Exception as e:
         logger.error(f"Failed to get stream for {next_track.title}: {str(e)[:200]}")
-        await ctx.send_followup(f"❌ Failed to play: **{next_track.title}**")
-        await play_next(ctx, vc, bot)
-        return
+        if state.text_channel:
+            await state.text_channel.send(f"❌ Failed to play: **{next_track.title}**")
+        await play_next(guild_id, vc, bot)
     
     # Verify connection again
     if not vc or not vc.is_connected():
@@ -196,7 +197,7 @@ async def play_next(ctx, vc, bot):
         
         # Queue next track
         if vc and vc.is_connected():
-            fut = asyncio.run_coroutine_threadsafe(play_next(ctx, vc, bot), bot.loop)
+            fut = asyncio.run_coroutine_threadsafe(play_next(guild_id, vc, bot), bot.loop)
             try:
                 fut.result()
             except Exception as exc:
@@ -206,7 +207,6 @@ async def play_next(ctx, vc, bot):
             state.current_track = None
     
     try:
-        # Clean FFmpeg options without volume (PCMVolumeTransformer handles volume)
         ffmpeg_options = {
             'before_options': (
                 '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '

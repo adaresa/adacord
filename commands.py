@@ -604,6 +604,8 @@ def setup_all_commands(bot):
             return
         
         state = get_guild_state(ctx.guild.id)
+
+        state.text_channel = ctx.channel
         
         # Check if we need to create display (first track added)
         needs_display = not state.current_track and not state.queue
@@ -626,7 +628,7 @@ def setup_all_commands(bot):
             await update_display_for_guild(ctx.guild.id)
         
         if not state.is_playing:
-            await play_next(ctx, vc, bot)
+            await play_next(ctx.guild.id, vc, bot)
     
     # Enhanced control commands
     @bot.slash_command(name="pause", description="Pause the current track")
