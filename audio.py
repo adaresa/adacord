@@ -4,8 +4,9 @@ import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import discord
+from discord.ext import commands as dpy_commands
 import aiohttp
 import re
 
@@ -18,6 +19,7 @@ class Track:
     duration: Optional[int] = None
     requester: Optional[str] = None
     stream_url: Optional[str] = None
+    stream_headers: Optional[Dict[str, str]] = None
 
 @dataclass
 class GuildState:
@@ -54,7 +56,34 @@ class AudioExtractor:
             'extractaudio': True,
             'audioformat': 'mp3',
             'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+            'geo_bypass': True,
+            'ignoreerrors': True,
+            'nocheckcertificate': True,
+            'cachedir': False,
+            'source_address': '0.0.0.0',  # force IPv4 to avoid some 403s on IPv6-only routes
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Linux; Android 10; SM-G975F) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/124.0.0.0 Mobile Safari/537.36'
+                ),
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': '*/*',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/',
+            },
+            # Prefer Android client to avoid some age/region restrictions and 403s
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android']
+                }
+            },
         }
+
+        # Optional cookies for restricted videos
+        cookies_path = os.getenv('YTDLP_COOKIES')
+        if cookies_path and os.path.exists(cookies_path):
+            self.ydl_opts['cookiefile'] = cookies_path
     
     async def extract_info(self, query: str, download: bool = False) -> Dict[str, Any]:
         """Extract video info with timeout and error handling"""
@@ -72,8 +101,9 @@ class AudioExtractor:
         except Exception as e:
             raise Exception(f"Extraction failed: {str(e)[:100]}")
     
-    async def get_stream_url(self, query: str) -> str:
-        """Get direct stream URL without downloading"""
+    async def get_stream_url(self, query: str) -> Tuple[str, Dict[str, str]]:
+        """Get direct stream URL and required HTTP headers without downloading"""
+        # If a raw URL is passed, prefer that directly; otherwise rely on ytsearch1
         info = await self.extract_info(query, download=False)
         
         if 'entries' in info and info['entries']:
@@ -81,18 +111,37 @@ class AudioExtractor:
         else:
             entry = info
         
+        # yt-dlp may provide required HTTP headers that must be forwarded to ffmpeg
+        http_headers: Dict[str, str] = entry.get('http_headers') or info.get('http_headers') or {}
+
         # Get the best audio stream URL
         if 'url' in entry:
-            return entry['url']
+            return entry['url'], http_headers
         
         # Fallback to formats if direct URL not available
         formats = entry.get('formats', [])
-        audio_formats = [f for f in formats if f.get('acodec') != 'none']
+        audio_formats = [f for f in formats if (f.get('acodec') and f.get('acodec') != 'none')]
         
         if audio_formats:
             # Prefer highest quality audio
             best_audio = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
-            return best_audio['url']
+            return best_audio['url'], http_headers
+
+        # If formats missing (common for some search results), try re-extracting via webpage_url
+        webpage_url = entry.get('webpage_url') or entry.get('url')
+        if webpage_url and not is_url(query):
+            info2 = await self.extract_info(webpage_url, download=False)
+            if 'entries' in info2 and info2['entries']:
+                entry2 = info2['entries'][0]
+            else:
+                entry2 = info2
+
+            http_headers = entry2.get('http_headers') or info2.get('http_headers') or http_headers
+            formats2 = entry2.get('formats', [])
+            audio_formats2 = [f for f in formats2 if (f.get('acodec') and f.get('acodec') != 'none')]
+            if audio_formats2:
+                best_audio = max(audio_formats2, key=lambda x: x.get('abr', 0) or 0)
+                return best_audio['url'], http_headers
         
         raise Exception("No audio stream found")
 
@@ -119,7 +168,7 @@ async def fetch_track_info(query: str, requester: str = None) -> Track:
         logger.debug(f"Info fetch failed for {query}: {str(e)[:100]}")        
         return Track(url=query, title=query, requester=requester)
 
-async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'commands.Bot'):
+async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'dpy_commands.Bot'):
     """Enhanced play_next with real-time volume control"""
     state = get_guild_state(guild_id)
     
@@ -167,9 +216,10 @@ async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'commands.Bot')
     state.current_track = next_track
     
     try:
-        # Get stream URL
-        stream_url = await extractor.get_stream_url(next_track.url)
+        # Get stream URL and headers
+        stream_url, stream_headers = await extractor.get_stream_url(next_track.url)
         next_track.stream_url = stream_url
+        next_track.stream_headers = stream_headers
         
         if state.text_channel:
             await state.text_channel.send(f"🎵 Now playing: **{next_track.title}**", delete_after=2)
@@ -207,9 +257,30 @@ async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'commands.Bot')
             state.current_track = None
     
     try:
+        # Build headers for ffmpeg (pass both -user_agent/-referer and -headers)
+        ua = None
+        ref = None
+        headers_option_parts = []
+        if next_track.stream_headers:
+            ua = next_track.stream_headers.get('User-Agent')
+            ref = next_track.stream_headers.get('Referer') or next_track.stream_headers.get('Referer'.lower())
+            headers_lines = ''.join(f"{k}: {v}\r\n" for k, v in next_track.stream_headers.items())
+            headers_option_parts.append(f'-headers "{headers_lines}"')
+        if not ua:
+            ua = (
+                'Mozilla/5.0 (Linux; Android 10; SM-G975F) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0.0.0 Mobile Safari/537.36'
+            )
+        if not ref:
+            ref = 'https://www.youtube.com/'
+        headers_option_parts.insert(0, f'-user_agent "{ua}"')
+        headers_option_parts.insert(1, f'-referer "{ref}"')
+        headers_option = ' '.join(headers_option_parts) + ' '
+
         ffmpeg_options = {
             'before_options': (
-                '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
+                f"{headers_option}-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
                 '-nostdin'
             ),
             'options': '-vn -b:a 128k'
