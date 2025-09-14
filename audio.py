@@ -3,7 +3,7 @@ import yt_dlp
 import asyncio
 import logging
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Tuple
 import discord
 from discord.ext import commands as dpy_commands
@@ -34,6 +34,7 @@ class GuildState:
     display_message: Optional[discord.Message] = None
     display_channel: Optional[discord.TextChannel] = None
     previous_volume: float = 1.0  # for mute/unmute functionality
+    connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # serialize voice connects
 
 guild_states: Dict[int, GuildState] = {}
 
@@ -47,20 +48,18 @@ def is_url(string: str) -> bool:
 
 class AudioExtractor:
     def __init__(self):
-        self.ydl_opts = {
+        self.base_opts = {
             'quiet': True,
             'no_warnings': True,
             'format': 'bestaudio/best',
             'noplaylist': True,
             'default_search': 'ytsearch1',
-            'extractaudio': True,
-            'audioformat': 'mp3',
-            'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
             'geo_bypass': True,
             'ignoreerrors': True,
             'nocheckcertificate': True,
             'cachedir': False,
-            'source_address': '0.0.0.0',  # force IPv4 to avoid some 403s on IPv6-only routes
+            'skip_download': True,
+            'source_address': '0.0.0.0',
             'http_headers': {
                 'User-Agent': (
                     'Mozilla/5.0 (Linux; Android 10; SM-G975F) '
@@ -72,15 +71,13 @@ class AudioExtractor:
                 'Origin': 'https://www.youtube.com',
                 'Referer': 'https://www.youtube.com/',
             },
-            # Prefer Android client to avoid some age/region restrictions and 403s
             'extractor_args': {
                 'youtube': {
                     'player_client': ['android']
                 }
             },
         }
-
-        # Optional cookies for restricted videos
+        self.ydl_opts = dict(self.base_opts)
         cookies_path = os.getenv('YTDLP_COOKIES')
         if cookies_path and os.path.exists(cookies_path):
             self.ydl_opts['cookiefile'] = cookies_path
@@ -102,32 +99,19 @@ class AudioExtractor:
             raise Exception(f"Extraction failed: {str(e)[:100]}")
     
     async def get_stream_url(self, query: str) -> Tuple[str, Dict[str, str]]:
-        """Get direct stream URL and required HTTP headers without downloading"""
-        # If a raw URL is passed, prefer that directly; otherwise rely on ytsearch1
+        """Get direct stream URL and required HTTP headers without downloading.
+        Tries primary extraction, then falls back to a second pass without special extractor_args if needed."""
         info = await self.extract_info(query, download=False)
-        
         if 'entries' in info and info['entries']:
             entry = info['entries'][0]
         else:
             entry = info
-        
-        # yt-dlp may provide required HTTP headers that must be forwarded to ffmpeg
-        http_headers: Dict[str, str] = entry.get('http_headers') or info.get('http_headers') or {}
-
-        # Get the best audio stream URL
-        if 'url' in entry:
-            return entry['url'], http_headers
-        
-        # Fallback to formats if direct URL not available
-        formats = entry.get('formats', [])
+        formats = entry.get('formats') or []
+        logger.debug(f"Primary extract formats={len(formats)} for query='{query}' title='{entry.get('title')}'")
         audio_formats = [f for f in formats if (f.get('acodec') and f.get('acodec') != 'none')]
-        
         if audio_formats:
-            # Prefer highest quality audio
             best_audio = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
-            return best_audio['url'], http_headers
-
-        # If formats missing (common for some search results), try re-extracting via webpage_url
+            return best_audio['url'], {}
         webpage_url = entry.get('webpage_url') or entry.get('url')
         if webpage_url and not is_url(query):
             info2 = await self.extract_info(webpage_url, download=False)
@@ -135,15 +119,55 @@ class AudioExtractor:
                 entry2 = info2['entries'][0]
             else:
                 entry2 = info2
-
-            http_headers = entry2.get('http_headers') or info2.get('http_headers') or http_headers
             formats2 = entry2.get('formats', [])
             audio_formats2 = [f for f in formats2 if (f.get('acodec') and f.get('acodec') != 'none')]
             if audio_formats2:
                 best_audio = max(audio_formats2, key=lambda x: x.get('abr', 0) or 0)
-                return best_audio['url'], http_headers
-        
-        raise Exception("No audio stream found")
+                return best_audio['url'], {}
+        # FINAL FALLBACKS
+        # 1) Re-extract with web client instead of android
+        fallback_opts = dict(self.base_opts)
+        try:
+            fallback_opts['extractor_args'] = {'youtube': {'player_client': ['web']}}
+            loop = asyncio.get_event_loop()
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                web_info = await loop.run_in_executor(None, lambda: ydl.extract_info(query, download=False))
+            if 'entries' in web_info and web_info['entries']:
+                wentry = web_info['entries'][0]
+            else:
+                wentry = web_info
+            wformats = wentry.get('formats', [])
+            logger.debug(f"Web client fallback formats={len(wformats)}")
+            if 'url' in wentry:
+                return wentry['url'], wentry.get('http_headers') or {}
+            waudio = [f for f in wformats if (f.get('acodec') and f.get('acodec') != 'none')]
+            if waudio:
+                best_audio = max(waudio, key=lambda x: x.get('abr', 0) or 0)
+                return best_audio['url'], wentry.get('http_headers') or {}
+        except Exception as fe2:
+            logger.debug(f"Web client fallback failed: {fe2}")
+        # 2) Explicit ytsearch1: prefix if not URL already
+        if not is_url(query):
+            try:
+                prefixed = f"ytsearch1:{query}"
+                loop = asyncio.get_event_loop()
+                with yt_dlp.YoutubeDL(self.base_opts) as ydl:
+                    search_info = await loop.run_in_executor(None, lambda: ydl.extract_info(prefixed, download=False))
+                if 'entries' in search_info and search_info['entries']:
+                    sentry = search_info['entries'][0]
+                else:
+                    sentry = search_info
+                sformats = sentry.get('formats', [])
+                logger.debug(f"Explicit ytsearch1 fallback formats={len(sformats)}")
+                if 'url' in sentry:
+                    return sentry['url'], sentry.get('http_headers') or {}
+                saudio = [f for f in sformats if (f.get('acodec') and f.get('acodec') != 'none')]
+                if saudio:
+                    best_audio = max(saudio, key=lambda x: x.get('abr', 0) or 0)
+                    return best_audio['url'], sentry.get('http_headers') or {}
+            except Exception as se:
+                logger.debug(f"Explicit ytsearch fallback failed: {se}")
+        raise Exception("No audio stream found after fallbacks")
 
 extractor = AudioExtractor()
 
@@ -169,7 +193,7 @@ async def fetch_track_info(query: str, requester: str = None) -> Track:
         return Track(url=query, title=query, requester=requester)
 
 async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'dpy_commands.Bot'):
-    """Enhanced play_next with real-time volume control"""
+    logger.debug(f"play_next invoked for guild {guild_id}; vc connected={vc.is_connected() if vc else None}")
     state = get_guild_state(guild_id)
     
     # Import here to avoid circular import
@@ -220,7 +244,7 @@ async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'dpy_commands.B
         stream_url, stream_headers = await extractor.get_stream_url(next_track.url)
         next_track.stream_url = stream_url
         next_track.stream_headers = stream_headers
-        
+        logger.debug(f"Obtained stream URL for '{next_track.title}' (len={len(stream_url) if stream_url else 0})")
         if state.text_channel:
             await state.text_channel.send(f"🎵 Now playing: **{next_track.title}**", delete_after=2)
         
@@ -295,10 +319,9 @@ async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'dpy_commands.B
         
         vc.play(volume_source, after=after_playing)
         state.is_playing = True
-        
+        logger.debug(f"Started playback for '{next_track.title}' at volume {state.volume}")
         # Update display
         await update_display_for_guild(guild_id)
-        
     except Exception as e:
         logger.error(f"Failed to play stream: {e}")
         after_playing(e)

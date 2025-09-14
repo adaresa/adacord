@@ -1,4 +1,4 @@
-py-cord
+py-cord[voice]>=2.6.0,<3.0.0
 yt-dlp>=2025.06.30
-python-dotenv
-PyNaCl 
+python-dotenv>=1.0.0
+PyNaCl>=1.5.0

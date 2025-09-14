@@ -5,6 +5,13 @@ from dotenv import load_dotenv
 import logging
 from commands import setup_all_commands
 
+# Attempt to load opus early for voice stability
+try:
+    if not discord.opus.is_loaded():
+        discord.opus.load_opus('libopus.so.0')
+except Exception as e:
+    logging.getLogger(__name__).warning(f"Could not pre-load opus library: {e}")
+
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
@@ -39,7 +46,11 @@ bot = commands.Bot(
 async def on_ready():
     logger.info(f'🤖 Logged in as {bot.user} (ID: {bot.user.id})')
     logger.info(f'📊 Connected to {len(bot.guilds)} guild(s)')
-    
+    if discord.opus.is_loaded():
+        logger.info("🎧 Opus loaded successfully for voice.")
+    else:
+        logger.warning("⚠️ Opus not loaded; voice playback may fail.")
+
     # Set presence
     activity = discord.CustomActivity(name="kassu's discord bot")
     await bot.change_presence(activity=activity, status=discord.Status.online)

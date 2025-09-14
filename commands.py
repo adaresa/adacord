@@ -11,6 +11,45 @@ import random
 
 logger = logging.getLogger(__name__)
 
+# Robust voice connection helper
+async def ensure_voice_connection(ctx: discord.ApplicationContext, target_channel: discord.VoiceChannel) -> discord.VoiceClient | None:
+    state = get_guild_state(ctx.guild.id)
+    async with state.connect_lock:
+        vc = ctx.voice_client
+        # Move if connected elsewhere
+        if vc and vc.is_connected() and vc.channel != target_channel:
+            try:
+                await vc.move_to(target_channel)
+            except Exception as e:
+                logger.warning(f"Move failed, attempting fresh connect: {e}")
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    pass
+                vc = None
+        if not vc or not vc.is_connected():
+            # Up to 2 attempts
+            for attempt in range(2):
+                try:
+                    vc = await target_channel.connect(reconnect=False, timeout=7)
+                    break
+                except Exception as e:
+                    logger.warning(f"Voice connect attempt {attempt+1} failed: {e}")
+                    await asyncio.sleep(1.5)
+            else:
+                return None
+        # Wait briefly for connected state
+        for _ in range(8):
+            if vc.is_connected():
+                return vc
+            await asyncio.sleep(0.5)
+        logger.error("Voice client did not report connected after timeout")
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+        return None
+
 # ============= PERSISTENT DISPLAY CLASSES =============
 
 class PersistentControlPanel(discord.ui.View):
@@ -586,20 +625,15 @@ def setup_all_commands(bot):
             return
         
         channel = ctx.author.voice.channel
-        try:
-            vc = ctx.voice_client or await channel.connect()
-            if vc.channel != channel:
-                logger.info(f"Moving to voice channel '{channel.name}' in guild '{ctx.guild.name}'.")
-                await vc.move_to(channel)
-        except Exception as e:
-            await ctx.followup.send(f"❌ Failed to join voice: {e}")
+        # Use robust ensure connection
+        vc = await ensure_voice_connection(ctx, channel)
+        if not vc:
+            await ctx.followup.send("❌ Failed to join voice channel after multiple attempts.", ephemeral=True)
             return
         
+        # Fetch track info
         try:
-            track = await asyncio.wait_for(
-                fetch_track_info(query, str(ctx.author)), 
-                timeout=15
-            )
+            track = await asyncio.wait_for(fetch_track_info(query, str(ctx.author)), timeout=15)
         except asyncio.TimeoutError:
             await ctx.followup.send("⏱️ Timed out fetching track info.")
             return
@@ -608,32 +642,20 @@ def setup_all_commands(bot):
             return
         
         state = get_guild_state(ctx.guild.id)
-
         state.text_channel = ctx.channel
-        
-        # Check if we need to create display (first track added)
         needs_display = not state.current_track and not state.queue
-        
         state.queue.append(track)
-
         logger.info(f"Added '{track.title}' to the queue for guild '{ctx.guild.name}'. Queue size: {len(state.queue)}.")
-        
-       # Show queue position with auto-delete
         position = len(state.queue)
         if state.current_track:
-           await ctx.followup.send(f"✅ Added to queue (#{position}): **{track.title}**", delete_after=3)
+            await ctx.followup.send(f"✅ Added to queue (#{position}): **{track.title}**", delete_after=3)
         else:
-           await ctx.followup.send(f"✅ Added: **{track.title}**", delete_after=3)
-    
-        
-        # Create display if this is the first track
+            await ctx.followup.send(f"✅ Added: **{track.title}**", delete_after=3)
         if needs_display:
             await create_or_update_display(ctx.guild.id, ctx.channel)
         else:
-            # Update existing display
             await update_display_for_guild(ctx.guild.id)
-        
-        if not state.is_playing:
+        if not state.is_playing and vc.is_connected():
             await play_next(ctx.guild.id, vc, bot)
     
     # Enhanced control commands
