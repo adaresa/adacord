@@ -180,6 +180,26 @@ async def test_pause_resume_volume_shuffle_loop_update_player(monkeypatch) -> No
     assert len(updates) == 5
 
 
+async def test_volume_impl_clamps_direct_helper_inputs(monkeypatch) -> None:
+    player = FakePlayer()
+
+    async def fake_update(guild_id, player):
+        return None
+
+    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(commands, "update_display_for_guild", fake_update)
+
+    high_interaction = FakeInteraction(guild=player.guild)
+    await commands.volume_impl(high_interaction, 250)
+    assert player.volume_calls[-1] == 200
+    assert last_response_text(high_interaction) == "Volume: 200%"
+
+    low_interaction = FakeInteraction(guild=player.guild)
+    await commands.volume_impl(low_interaction, -10)
+    assert player.volume_calls[-1] == 0
+    assert last_response_text(low_interaction) == "Volume: 0%"
+
+
 async def test_empty_state_commands_respond_ephemerally(monkeypatch) -> None:
     monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: None)
 
@@ -228,6 +248,33 @@ async def test_remove_and_move_queue_items(monkeypatch) -> None:
 
     assert list(player.queue) == [third, first]
     assert last_response_text(move_interaction) == "Moved **Third** to position 1."
+
+
+async def test_remove_rejects_positions_below_one(monkeypatch) -> None:
+    first = FakeTrack("First")
+    player = FakePlayer(queue=FakeQueue([first]))
+    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: player)
+
+    interaction = FakeInteraction(guild=player.guild)
+    await commands.remove_impl(interaction, 0)
+
+    assert list(player.queue) == [first]
+    assert last_response_text(interaction) == "Queue positions start at 1."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+
+
+async def test_move_rejects_positions_below_one(monkeypatch) -> None:
+    first = FakeTrack("First")
+    second = FakeTrack("Second")
+    player = FakePlayer(queue=FakeQueue([first, second]))
+    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: player)
+
+    interaction = FakeInteraction(guild=player.guild)
+    await commands.move_impl(interaction, -1, 1)
+
+    assert list(player.queue) == [first, second]
+    assert last_response_text(interaction) == "Queue positions start at 1."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
 async def test_queue_and_nowplaying_send_ephemeral_embeds(monkeypatch) -> None:

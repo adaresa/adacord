@@ -161,8 +161,9 @@ async def volume_impl(interaction: discord.Interaction, level: int) -> None:
     if not player:
         await respond(interaction, "Not connected.", ephemeral=True)
         return
-    await set_volume(player, int(level))
-    await respond(interaction, f"Volume: {int(level)}%")
+    volume = max(0, min(200, int(level)))
+    await set_volume(player, volume)
+    await respond(interaction, f"Volume: {volume}%")
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -182,6 +183,9 @@ async def remove_impl(interaction: discord.Interaction, position: int) -> None:
     if not tracks:
         await respond(interaction, "Queue is empty.", ephemeral=True)
         return
+    if position < 1:
+        await respond(interaction, "Queue positions start at 1.", ephemeral=True)
+        return
     if position > len(tracks):
         await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
         return
@@ -196,6 +200,9 @@ async def move_impl(interaction: discord.Interaction, from_pos: int, to_pos: int
     tracks = queue_items(player) if player else []
     if not tracks:
         await respond(interaction, "Queue is empty.", ephemeral=True)
+        return
+    if from_pos < 1 or to_pos < 1:
+        await respond(interaction, "Queue positions start at 1.", ephemeral=True)
         return
     if from_pos > len(tracks) or to_pos > len(tracks):
         await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
