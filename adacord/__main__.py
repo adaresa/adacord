@@ -1,5 +1,6 @@
-from adacord.bot import bot, run
+from adacord.bot import run
 
 
 if __name__ == "__main__":
     run()
+

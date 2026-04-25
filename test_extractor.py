@@ -3,9 +3,9 @@ import os
 
 import wavelink
 
-from audio import choose_best_song_candidate, default_volume, display_track_title, search_youtube
-from commands import message_delete_after
-from source_utils import format_duration, is_url, spotify_playlist_id
+from adacord.config import default_volume, message_delete_after
+from adacord.sources import choose_best_song_candidate, search_youtube
+from adacord.utils import display_track_title, format_duration, is_url, spotify_playlist_id
 
 
 class FakeTrack:

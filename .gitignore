@@ -7,6 +7,7 @@ __pycache__/
 # Environment
 .env
 bot.log
+AGENTS.md
 
 # Docker
 *.db
