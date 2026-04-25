@@ -3,9 +3,18 @@ import os
 
 import wavelink
 
-from adacord.config import default_volume, message_delete_after
+from types import SimpleNamespace
+
+from adacord.config import default_volume, message_delete_after, voice_connect_timeout
 from adacord.sources import choose_best_song_candidate, search_youtube
-from adacord.utils import display_track_title, format_duration, is_url, spotify_playlist_id
+from adacord.utils import (
+    display_track_title,
+    format_duration,
+    is_url,
+    spotify_playlist_id,
+    track_display_title,
+    track_requester,
+)
 
 
 class FakeTrack:
@@ -76,6 +85,19 @@ def test_display_title_keeps_requested_variant_visible() -> None:
     assert display_track_title(track, "rockefeller street") == "Rockefeller Street"
 
 
+def test_track_extras_support_dict_and_attribute_access() -> None:
+    dict_track = FakeTrack("Fallback")
+    dict_track.extras = {"requester": "ada", "display_title": "Custom dict title"}
+
+    attr_track = FakeTrack("Fallback")
+    attr_track.extras = SimpleNamespace(requester="kassu", display_title="Custom attr title")
+
+    assert track_requester(dict_track) == "ada"
+    assert track_display_title(dict_track) == "Custom dict title"
+    assert track_requester(attr_track) == "kassu"
+    assert track_display_title(attr_track) == "Custom attr title"
+
+
 async def test_url_search_keeps_first_result() -> None:
     first = FakeTrack("Specific video URL")
     better = FakeTrack("Specific video URL lyrics")
@@ -133,6 +155,24 @@ def test_default_volume_values() -> None:
             os.environ["DEFAULT_VOLUME"] = previous
 
 
+def test_voice_connect_timeout_values() -> None:
+    previous = os.environ.get("VOICE_CONNECT_TIMEOUT")
+    try:
+        os.environ.pop("VOICE_CONNECT_TIMEOUT", None)
+        assert voice_connect_timeout() == 30
+        os.environ["VOICE_CONNECT_TIMEOUT"] = "not-a-number"
+        assert voice_connect_timeout() == 30
+        os.environ["VOICE_CONNECT_TIMEOUT"] = "-10"
+        assert voice_connect_timeout() == 0
+        os.environ["VOICE_CONNECT_TIMEOUT"] = "45.5"
+        assert voice_connect_timeout() == 45.5
+    finally:
+        if previous is None:
+            os.environ.pop("VOICE_CONNECT_TIMEOUT", None)
+        else:
+            os.environ["VOICE_CONNECT_TIMEOUT"] = previous
+
+
 if __name__ == "__main__":
     test_url_detection()
     test_spotify_playlist_id()
@@ -141,7 +181,9 @@ if __name__ == "__main__":
     test_song_candidate_avoids_extended_result()
     test_song_candidate_allows_requested_variant_terms()
     test_display_title_keeps_requested_variant_visible()
+    test_track_extras_support_dict_and_attribute_access()
     asyncio.run(test_url_search_keeps_first_result())
     test_message_delete_after_default_and_invalid_values()
     test_default_volume_values()
+    test_voice_connect_timeout_values()
     print("OK")

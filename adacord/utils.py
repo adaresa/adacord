@@ -1,4 +1,5 @@
 import re
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 SPOTIFY_PLAYLIST_RE = re.compile(
@@ -101,15 +102,23 @@ def display_track_title(track: object, query: str | None = None) -> str:
 
 
 def track_requester(track: object) -> str | None:
-    try:
-        return track.extras.requester
-    except AttributeError:
-        return None
+    extras = getattr(track, "extras", None)
+    if isinstance(extras, Mapping):
+        requester = extras.get("requester")
+    else:
+        requester = getattr(extras, "requester", None)
+
+    return str(requester) if requester is not None else None
 
 
 def track_display_title(track: object) -> str:
-    try:
-        return track.extras.display_title
-    except AttributeError:
-        return getattr(track, "title", "Unknown track")
+    extras = getattr(track, "extras", None)
+    if isinstance(extras, Mapping):
+        display_title = extras.get("display_title")
+    else:
+        display_title = getattr(extras, "display_title", None)
 
+    if display_title is not None:
+        return str(display_title)
+
+    return getattr(track, "title", "Unknown track")

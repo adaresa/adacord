@@ -60,4 +60,8 @@ def player_idle_timeout() -> int:
 
 
 def voice_connect_timeout() -> float:
-    return float(os.getenv("VOICE_CONNECT_TIMEOUT", "30"))
+    raw_value = os.getenv("VOICE_CONNECT_TIMEOUT", "30").strip()
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return 30.0
