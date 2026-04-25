@@ -11,7 +11,7 @@ The bot handles Discord commands and queue controls. Lavalink handles track load
 - Spotify playlist links via public playlist metadata and YouTube Music resolution
 - Queue, skip, pause, resume, clear, shuffle, remove, move, loop, volume, and disconnect commands
 - Persistent Discord control panel
-- Docker Compose setup with separate bot and Lavalink services
+- Docker Compose setup with separate bot, Lavalink, and YouTube cipher services
 
 ## Commands
 
@@ -38,7 +38,8 @@ The bot handles Discord commands and queue controls. Lavalink handles track load
 3. Optionally set `DISCORD_GUILD_ID` for instant slash-command syncing to one server.
 4. Optionally set `MESSAGE_DELETE_AFTER` to control transient bot message cleanup in seconds. Use `0` to keep confirmations.
 5. Optionally set `DEFAULT_VOLUME` from `0` to `200`. The default is `50`.
-6. Start everything:
+6. Optionally set `VOICE_CONNECT_TIMEOUT` if Discord voice joins need longer than the default `30` seconds.
+7. Start everything:
 
 ```bash
 docker compose up -d --build
@@ -60,10 +61,43 @@ Install dependencies:
 python -m pip install -r requirements.txt
 ```
 
-Run the lightweight local checks:
+Run the Docker stack locally:
 
 ```bash
-python -m py_compile bot.py audio.py commands.py source_utils.py test_extractor.py
+docker compose up -d --build
+```
+
+Rebuild only the bot after Python code changes:
+
+```bash
+docker compose up -d --build bot
+```
+
+Check container status and logs:
+
+```bash
+docker compose ps
+docker compose logs --tail=120 bot lavalink yt-cipher
+docker compose logs -f bot lavalink yt-cipher
+```
+
+Stop the local stack:
+
+```bash
+docker compose down
+```
+
+Run the lightweight local checks in PowerShell:
+
+```powershell
+python -m py_compile bot.py (Get-ChildItem adacord -Filter *.py).FullName test_extractor.py
+python test_extractor.py
+```
+
+Or, in shells that expand globs:
+
+```bash
+python -m py_compile bot.py adacord/*.py test_extractor.py
 python test_extractor.py
 ```
 
@@ -71,6 +105,12 @@ To run the bot outside Docker, start a Lavalink node and set:
 
 ```bash
 LAVALINK_URI=http://localhost:2333
+```
+
+Then run:
+
+```bash
+python -m adacord
 ```
 
 ## Notes

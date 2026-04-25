@@ -9,4 +9,4 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "bot.py"]
+CMD ["python", "-m", "adacord"]
