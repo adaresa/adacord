@@ -61,6 +61,12 @@ Install dependencies:
 python -m pip install -r requirements.txt
 ```
 
+Install test dependencies:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
 Run the Docker stack locally:
 
 ```bash
@@ -90,15 +96,15 @@ docker compose down
 Run the lightweight local checks in PowerShell:
 
 ```powershell
-python -m py_compile bot.py (Get-ChildItem adacord -Filter *.py).FullName test_extractor.py
-python test_extractor.py
+python -m py_compile bot.py (Get-ChildItem adacord -Filter *.py).FullName (Get-ChildItem tests -Filter *.py).FullName
+python -m pytest
 ```
 
 Or, in shells that expand globs:
 
 ```bash
-python -m py_compile bot.py adacord/*.py test_extractor.py
-python test_extractor.py
+python -m py_compile bot.py adacord/*.py tests/*.py
+python -m pytest
 ```
 
 To run the bot outside Docker, start a Lavalink node and set:

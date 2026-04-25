@@ -127,6 +127,97 @@ async def nowplaying_impl(interaction: discord.Interaction) -> None:
     )
 
 
+async def pause_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    if not player or not player.current:
+        await respond(interaction, "Nothing is playing.", ephemeral=True)
+        return
+    await player.pause(True)
+    await respond(interaction, "Paused.")
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def resume_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    if not player or not player.paused:
+        await respond(interaction, "Nothing is paused.", ephemeral=True)
+        return
+    await player.pause(False)
+    await respond(interaction, "Resumed.")
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def queue_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    await interaction.response.send_message(
+        embed=build_queue_embed(player),
+        view=QueueView(interaction.guild_id or 0, player),
+        ephemeral=True,
+    )
+
+
+async def volume_impl(interaction: discord.Interaction, level: int) -> None:
+    player = player_for_interaction(interaction)
+    if not player:
+        await respond(interaction, "Not connected.", ephemeral=True)
+        return
+    await set_volume(player, int(level))
+    await respond(interaction, f"Volume: {int(level)}%")
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def shuffle_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    if not player or player.queue.is_empty:
+        await respond(interaction, "Queue is empty.", ephemeral=True)
+        return
+    player.queue.shuffle()
+    await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def remove_impl(interaction: discord.Interaction, position: int) -> None:
+    player = player_for_interaction(interaction)
+    tracks = queue_items(player) if player else []
+    if not tracks:
+        await respond(interaction, "Queue is empty.", ephemeral=True)
+        return
+    if position > len(tracks):
+        await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
+        return
+    removed = tracks[position - 1]
+    del player.queue[position - 1]
+    await respond(interaction, f"Removed **{track_display_title(removed)}**.")
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def move_impl(interaction: discord.Interaction, from_pos: int, to_pos: int) -> None:
+    player = player_for_interaction(interaction)
+    tracks = queue_items(player) if player else []
+    if not tracks:
+        await respond(interaction, "Queue is empty.", ephemeral=True)
+        return
+    if from_pos > len(tracks) or to_pos > len(tracks):
+        await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
+        return
+    track = tracks[from_pos - 1]
+    del player.queue[from_pos - 1]
+    player.queue.put_at(to_pos - 1, track)
+    await respond(interaction, f"Moved **{track_display_title(track)}** to position {to_pos}.")
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def loop_impl(interaction: discord.Interaction, mode: app_commands.Choice[str] | str) -> None:
+    player = player_for_interaction(interaction)
+    if not player:
+        await respond(interaction, "Not connected.", ephemeral=True)
+        return
+    mode_value = mode.value if isinstance(mode, app_commands.Choice) else str(mode)
+    set_loop_mode(player, mode_value)
+    await respond(interaction, f"Loop: {mode_value}")
+    await update_display_for_guild(player.guild.id, player)
+
+
 def setup_all_commands(bot: commands.Bot) -> None:
     @bot.tree.command(name="play", description="Play a YouTube URL/search or Spotify playlist link")
     @app_commands.describe(query="YouTube URL, search terms, or Spotify playlist URL")
@@ -148,41 +239,19 @@ def setup_all_commands(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="pause", description="Pause the current track")
     async def pause(interaction: discord.Interaction) -> None:
-        player = player_for_interaction(interaction)
-        if not player or not player.current:
-            await respond(interaction, "Nothing is playing.", ephemeral=True)
-            return
-        await player.pause(True)
-        await respond(interaction, "Paused.")
-        await update_display_for_guild(player.guild.id, player)
+        await pause_impl(interaction)
 
     @bot.tree.command(name="resume", description="Resume the paused track")
     async def resume(interaction: discord.Interaction) -> None:
-        player = player_for_interaction(interaction)
-        if not player or not player.paused:
-            await respond(interaction, "Nothing is paused.", ephemeral=True)
-            return
-        await player.pause(False)
-        await respond(interaction, "Resumed.")
-        await update_display_for_guild(player.guild.id, player)
+        await resume_impl(interaction)
 
     @bot.tree.command(name="queue", description="Show the music queue")
     async def queue(interaction: discord.Interaction) -> None:
-        player = player_for_interaction(interaction)
-        await interaction.response.send_message(
-            embed=build_queue_embed(player),
-            view=QueueView(interaction.guild_id or 0, player),
-            ephemeral=True,
-        )
+        await queue_impl(interaction)
 
     @bot.tree.command(name="q", description="Short alias for /queue")
     async def queue_alias(interaction: discord.Interaction) -> None:
-        player = player_for_interaction(interaction)
-        await interaction.response.send_message(
-            embed=build_queue_embed(player),
-            view=QueueView(interaction.guild_id or 0, player),
-            ephemeral=True,
-        )
+        await queue_impl(interaction)
 
     @bot.tree.command(name="clear", description="Clear the queue and stop playback")
     async def clear(interaction: discord.Interaction) -> None:
@@ -203,39 +272,16 @@ def setup_all_commands(bot: commands.Bot) -> None:
     @bot.tree.command(name="volume", description="Set playback volume from 0 to 200 percent")
     @app_commands.describe(level="Volume from 0 to 200")
     async def volume(interaction: discord.Interaction, level: app_commands.Range[int, 0, 200]) -> None:
-        player = player_for_interaction(interaction)
-        if not player:
-            await respond(interaction, "Not connected.", ephemeral=True)
-            return
-        await set_volume(player, int(level))
-        await respond(interaction, f"Volume: {int(level)}%")
-        await update_display_for_guild(player.guild.id, player)
+        await volume_impl(interaction, int(level))
 
     @bot.tree.command(name="shuffle", description="Shuffle the queue")
     async def shuffle(interaction: discord.Interaction) -> None:
-        player = player_for_interaction(interaction)
-        if not player or player.queue.is_empty:
-            await respond(interaction, "Queue is empty.", ephemeral=True)
-            return
-        player.queue.shuffle()
-        await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
-        await update_display_for_guild(player.guild.id, player)
+        await shuffle_impl(interaction)
 
     @bot.tree.command(name="remove", description="Remove a queued track by position")
     @app_commands.describe(position="1-based queue position")
     async def remove(interaction: discord.Interaction, position: app_commands.Range[int, 1, 500]) -> None:
-        player = player_for_interaction(interaction)
-        tracks = queue_items(player) if player else []
-        if not tracks:
-            await respond(interaction, "Queue is empty.", ephemeral=True)
-            return
-        if position > len(tracks):
-            await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
-            return
-        removed = tracks[position - 1]
-        del player.queue[position - 1]
-        await respond(interaction, f"Removed **{track_display_title(removed)}**.")
-        await update_display_for_guild(player.guild.id, player)
+        await remove_impl(interaction, int(position))
 
     @bot.tree.command(name="move", description="Move a queued track")
     async def move(
@@ -243,19 +289,7 @@ def setup_all_commands(bot: commands.Bot) -> None:
         from_pos: app_commands.Range[int, 1, 500],
         to_pos: app_commands.Range[int, 1, 500],
     ) -> None:
-        player = player_for_interaction(interaction)
-        tracks = queue_items(player) if player else []
-        if not tracks:
-            await respond(interaction, "Queue is empty.", ephemeral=True)
-            return
-        if from_pos > len(tracks) or to_pos > len(tracks):
-            await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
-            return
-        track = tracks[from_pos - 1]
-        del player.queue[from_pos - 1]
-        player.queue.put_at(to_pos - 1, track)
-        await respond(interaction, f"Moved **{track_display_title(track)}** to position {to_pos}.")
-        await update_display_for_guild(player.guild.id, player)
+        await move_impl(interaction, int(from_pos), int(to_pos))
 
     @bot.tree.command(name="loop", description="Set loop mode")
     @app_commands.choices(
@@ -266,13 +300,7 @@ def setup_all_commands(bot: commands.Bot) -> None:
         ]
     )
     async def loop(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
-        player = player_for_interaction(interaction)
-        if not player:
-            await respond(interaction, "Not connected.", ephemeral=True)
-            return
-        set_loop_mode(player, mode.value)
-        await respond(interaction, f"Loop: {mode.value}")
-        await update_display_for_guild(player.guild.id, player)
+        await loop_impl(interaction, mode)
 
     @bot.tree.command(name="nowplaying", description="Show the current player")
     async def nowplaying(interaction: discord.Interaction) -> None:
