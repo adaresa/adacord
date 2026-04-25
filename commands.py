@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 
 import discord
@@ -10,6 +11,7 @@ import wavelink
 from audio import (
     add_tracks,
     clear_player,
+    default_volume,
     disconnect_player,
     ensure_player,
     format_duration,
@@ -25,11 +27,51 @@ from audio import (
 logger = logging.getLogger(__name__)
 
 
+def message_delete_after() -> float:
+    raw_value = os.getenv("MESSAGE_DELETE_AFTER", "5").strip()
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return 5.0
+
+
+async def delete_message_later(message: discord.Message, delay: float) -> None:
+    if delay <= 0:
+        return
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+
+
+def schedule_delete(message: discord.Message | None, delay: float) -> None:
+    if message and delay > 0:
+        asyncio.create_task(delete_message_later(message, delay))
+
+
+async def send_transient(
+    channel: discord.abc.Messageable,
+    message: str,
+) -> discord.Message | None:
+    delay = message_delete_after()
+    sent = await channel.send(message)
+    schedule_delete(sent, delay)
+    return sent
+
+
 def track_requester(track: wavelink.Playable) -> str | None:
     try:
         return track.extras.requester
     except AttributeError:
         return None
+
+
+def track_display_title(track: wavelink.Playable) -> str:
+    try:
+        return track.extras.display_title
+    except AttributeError:
+        return track.title
 
 
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
@@ -44,10 +86,21 @@ async def respond(
     *,
     ephemeral: bool = False,
 ) -> None:
+    ephemeral = False
+    delay = message_delete_after()
     if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=ephemeral)
+        sent = await interaction.followup.send(
+            message,
+            ephemeral=ephemeral,
+            wait=delay > 0,
+        )
+        schedule_delete(sent, delay)
     else:
-        await interaction.response.send_message(message, ephemeral=ephemeral)
+        await interaction.response.send_message(
+            message,
+            ephemeral=ephemeral,
+            delete_after=delay or None,
+        )
 
 
 def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord.Embed:
@@ -62,7 +115,7 @@ def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord
 
     if current:
         duration = format_duration(current.length)
-        title = f"**{current.title}**"
+        title = f"**{track_display_title(current)}**"
         if duration:
             title += f" `[{duration}]`"
         embed.add_field(name="Now Playing", value=title, inline=False)
@@ -72,7 +125,7 @@ def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord
     else:
         embed.add_field(name="Now Playing", value="Nothing playing", inline=False)
 
-    volume = player.volume if player else 100
+    volume = player.volume if player else default_volume()
     embed.add_field(name="Volume", value=f"{volume}%", inline=True)
     if state.loop_mode != "none":
         embed.add_field(name="Loop", value=state.loop_mode.title(), inline=True)
@@ -83,7 +136,7 @@ def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord
         for index, track in enumerate(tracks[:5], start=1):
             duration = format_duration(track.length)
             suffix = f" `[{duration}]`" if duration else ""
-            preview.append(f"`{index}.` {track.title}{suffix}")
+            preview.append(f"`{index}.` {track_display_title(track)}{suffix}")
         if len(tracks) > 5:
             preview.append(f"...and {len(tracks) - 5} more")
         embed.add_field(name=f"Queue ({len(tracks)})", value="\n".join(preview), inline=False)
@@ -175,8 +228,9 @@ class PlayerControls(discord.ui.View):
             await set_volume(player, 0)
             await respond(interaction, "Muted.", ephemeral=True)
         else:
-            await set_volume(player, state.previous_volume or 100)
-            await respond(interaction, f"Volume: {state.previous_volume or 100}%", ephemeral=True)
+            volume = state.previous_volume or default_volume()
+            await set_volume(player, volume)
+            await respond(interaction, f"Volume: {volume}%", ephemeral=True)
         await self.refresh(interaction)
 
     @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, row=2)
@@ -251,7 +305,7 @@ def queue_page_count(player: wavelink.Player | None) -> int:
 def build_queue_embed(player: wavelink.Player | None, page: int = 0) -> discord.Embed:
     embed = discord.Embed(title="Music Queue", color=discord.Color.blurple())
     if player and player.current:
-        embed.add_field(name="Now Playing", value=f"**{player.current.title}**", inline=False)
+        embed.add_field(name="Now Playing", value=f"**{track_display_title(player.current)}**", inline=False)
 
     tracks = queue_items(player) if player else []
     if not tracks:
@@ -264,7 +318,7 @@ def build_queue_embed(player: wavelink.Player | None, page: int = 0) -> discord.
     for offset, track in enumerate(visible, start=1):
         duration = format_duration(track.length)
         suffix = f" `[{duration}]`" if duration else ""
-        lines.append(f"`{start + offset}.` **{track.title}**{suffix}")
+        lines.append(f"`{start + offset}.` **{track_display_title(track)}**{suffix}")
     embed.add_field(name=f"Up Next ({len(tracks)})", value="\n".join(lines), inline=False)
     embed.set_footer(text=f"Page {page + 1} of {queue_page_count(player)}")
     return embed
@@ -335,7 +389,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         player = await ensure_player(interaction.guild, channel)
     except Exception as exc:
         logger.exception("Failed to connect Lavalink player to voice")
-        await interaction.followup.send(f"Could not connect to voice: {exc}", ephemeral=True)
+        await respond(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
         return
 
     state = get_guild_state(interaction.guild.id)
@@ -345,11 +399,11 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         tracks, summary = await load_tracks(query, str(interaction.user))
     except Exception as exc:
         logger.exception("Failed to load query %r", query)
-        await interaction.followup.send(f"Could not load that request: {exc}", ephemeral=True)
+        await respond(interaction, f"Could not load that request: {exc}", ephemeral=True)
         return
 
     if not tracks:
-        await interaction.followup.send("No playable tracks were found.", ephemeral=True)
+        await respond(interaction, "No playable tracks were found.", ephemeral=True)
         return
 
     was_idle = not player.current and player.queue.is_empty
@@ -357,7 +411,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await add_tracks(player, tracks)
     except Exception as exc:
         logger.exception("Failed to start playback for query %r", query)
-        await interaction.followup.send(f"Could not start playback: {exc}", ephemeral=True)
+        await respond(interaction, f"Could not start playback: {exc}", ephemeral=True)
         return
 
     if was_idle and interaction.channel:
@@ -366,9 +420,9 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await update_display_for_guild(interaction.guild.id, player)
 
     if summary.added == 1:
-        await interaction.followup.send(f"Added: **{summary.title}**")
+        await respond(interaction, f"Added: **{summary.title}**")
     else:
-        await interaction.followup.send(f"Added {summary.added} tracks from **{summary.title}**.")
+        await respond(interaction, f"Added {summary.added} tracks from **{summary.title}**.")
 
 
 async def skip_impl(interaction: discord.Interaction) -> None:
@@ -517,7 +571,7 @@ def setup_all_commands(bot: commands.Bot) -> None:
             return
         removed = tracks[position - 1]
         del player.queue[position - 1]
-        await respond(interaction, f"Removed **{removed.title}**.")
+        await respond(interaction, f"Removed **{track_display_title(removed)}**.")
         await update_display_for_guild(player.guild.id, player)
 
     @bot.tree.command(name="move", description="Move a queued track")
@@ -537,7 +591,7 @@ def setup_all_commands(bot: commands.Bot) -> None:
         track = tracks[from_pos - 1]
         del player.queue[from_pos - 1]
         player.queue.put_at(to_pos - 1, track)
-        await respond(interaction, f"Moved **{track.title}** to position {to_pos}.")
+        await respond(interaction, f"Moved **{track_display_title(track)}** to position {to_pos}.")
         await update_display_for_guild(player.guild.id, player)
 
     @bot.tree.command(name="loop", description="Set loop mode")
@@ -583,5 +637,5 @@ async def handle_track_start(payload: wavelink.TrackStartEventPayload) -> None:
 async def handle_inactive_player(player: wavelink.Player) -> None:
     state = get_guild_state(player.guild.id)
     if state.display_channel:
-        await state.display_channel.send("Disconnected after being idle.")
+        await send_transient(state.display_channel, "Disconnected after being idle.")
     await update_display_for_guild(player.guild.id, player)

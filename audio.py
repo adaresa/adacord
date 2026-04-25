@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -12,13 +13,50 @@ from source_utils import format_duration, is_url, spotify_playlist_id
 logger = logging.getLogger(__name__)
 
 
+SONG_SEARCH_LIMIT = 8
+SONG_MIN_LENGTH_MS = 60_000
+SONG_IDEAL_MAX_LENGTH_MS = 7 * 60_000
+SONG_SOFT_MAX_LENGTH_MS = 10 * 60_000
+DEFAULT_VOLUME = 50
+
+SONG_HINT_TERMS = {
+    "audio",
+    "lyrics",
+    "lyric",
+    "official audio",
+    "official lyric",
+    "provided to youtube",
+    "topic",
+}
+AVOID_TERMS = {
+    "extended",
+    "hour",
+    "hours",
+    "loop",
+    "looped",
+    "mix",
+    "compilation",
+    "live",
+    "concert",
+    "reaction",
+    "tutorial",
+    "karaoke",
+    "instrumental",
+    "bass boosted",
+    "nightcore",
+    "slowed",
+    "reverb",
+    "remix",
+}
+
+
 @dataclass
 class GuildState:
     text_channel: discord.abc.Messageable | None = None
     display_message: discord.Message | None = None
     display_channel: discord.abc.Messageable | None = None
     loop_mode: str = "none"
-    previous_volume: int = 100
+    previous_volume: int = DEFAULT_VOLUME
     connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     idle_task: asyncio.Task[None] | None = None
 
@@ -31,6 +69,14 @@ class LoadSummary:
 
 
 guild_states: dict[int, GuildState] = {}
+
+
+def default_volume() -> int:
+    raw_value = os.getenv("DEFAULT_VOLUME", str(DEFAULT_VOLUME)).strip()
+    try:
+        return max(0, min(200, int(raw_value)))
+    except ValueError:
+        return DEFAULT_VOLUME
 
 
 def get_guild_state(guild_id: int) -> GuildState:
@@ -90,6 +136,7 @@ async def ensure_player(
         player.inactive_timeout = int(os.getenv("PLAYER_IDLE_TIMEOUT", "30"))
         player.inactive_channel_tokens = 1
         await wait_for_lavalink_voice(player)
+        await player.set_volume(default_volume())
         return player
 
 
@@ -120,7 +167,114 @@ async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
 
 def apply_requester(tracks: Iterable[wavelink.Playable], requester: str, query: str) -> None:
     for track in tracks:
-        track.extras = {"requester": requester, "query": query}
+        track.extras = {
+            "requester": requester,
+            "query": query,
+            "display_title": display_track_title(track, query),
+        }
+
+
+def normalized_words(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def text_contains_term(text: str, term: str) -> bool:
+    words = r"\s+".join(re.escape(word) for word in term.split())
+    return bool(re.search(rf"\b{words}\b", text))
+
+
+def avoid_terms_for_query(query: str) -> set[str]:
+    query_text = query.lower()
+    return {term for term in AVOID_TERMS if not text_contains_term(query_text, term)}
+
+
+def requested_variant_terms(query: str) -> set[str]:
+    return AVOID_TERMS - avoid_terms_for_query(query)
+
+
+def requested_display_variants(query: str) -> list[str]:
+    query_text = query.lower()
+    return sorted(term for term in AVOID_TERMS if text_contains_term(query_text, term))
+
+
+def track_text(track: wavelink.Playable) -> str:
+    title = getattr(track, "title", "") or ""
+    author = getattr(track, "author", "") or ""
+    return f"{title} {author}".lower()
+
+
+def track_source_text(track: wavelink.Playable) -> str:
+    source = getattr(track, "source", "") or ""
+    return str(source).lower()
+
+
+def display_track_title(track: wavelink.Playable, query: str | None = None) -> str:
+    title = getattr(track, "title", "") or "Unknown track"
+    if not query:
+        return title
+
+    title_text = title.lower()
+    variants = [
+        term
+        for term in requested_display_variants(query)
+        if not text_contains_term(title_text, term)
+    ]
+    if not variants:
+        return title
+
+    return f"{title} ({', '.join(variants)})"
+
+
+def score_song_candidate(track: wavelink.Playable, query: str) -> int:
+    text = track_text(track)
+    score = 0
+
+    query_words = normalized_words(query)
+    track_words = normalized_words(text)
+    if query_words:
+        score += int(40 * len(query_words & track_words) / len(query_words))
+
+    if any(text_contains_term(text, term) for term in SONG_HINT_TERMS):
+        score += 20
+    if track_source_text(track) in {"youtube music", "youtubemusic", "ytm"}:
+        score += 10
+
+    length = getattr(track, "length", None)
+    if length:
+        if SONG_MIN_LENGTH_MS <= length <= SONG_IDEAL_MAX_LENGTH_MS:
+            score += 25
+        elif length <= SONG_SOFT_MAX_LENGTH_MS:
+            score += 5
+        else:
+            score -= min(50, (length - SONG_SOFT_MAX_LENGTH_MS) // 60_000 * 5 + 15)
+
+    avoid_hits = [term for term in avoid_terms_for_query(query) if text_contains_term(text, term)]
+    score -= 30 * len(avoid_hits)
+    variant_hits = [term for term in requested_variant_terms(query) if text_contains_term(text, term)]
+    score += 25 * len(variant_hits)
+    return score
+
+
+def choose_best_song_candidate(
+    tracks: Iterable[wavelink.Playable],
+    query: str,
+) -> wavelink.Playable | None:
+    candidates = list(tracks)
+    if not candidates:
+        return None
+
+    ranked = sorted(
+        enumerate(candidates),
+        key=lambda item: (score_song_candidate(item[1], query), -item[0]),
+        reverse=True,
+    )
+    best = ranked[0][1]
+    best_score = score_song_candidate(best, query)
+    first_score = score_song_candidate(candidates[0], query)
+
+    if best_score < -20 and first_score >= best_score - 10:
+        return candidates[0]
+    return best
 
 
 async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
@@ -129,8 +283,11 @@ async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
 
     if isinstance(found, wavelink.Playlist):
         tracks = list(found.tracks)
-    else:
+    elif is_url(query):
         tracks = list(found[:1])
+    else:
+        candidate = choose_best_song_candidate(list(found[:SONG_SEARCH_LIMIT]), query)
+        tracks = [candidate] if candidate else []
 
     apply_requester(tracks, requester, query)
     return tracks
@@ -212,7 +369,7 @@ async def load_tracks(query: str, requester: str) -> tuple[list[wavelink.Playabl
         return tracks, LoadSummary("Spotify playlist", len(tracks), "spotify-youtube")
 
     tracks = await search_youtube(query, requester)
-    title = tracks[0].title if tracks else query
+    title = display_track_title(tracks[0], query) if tracks else query
     return tracks, LoadSummary(title, len(tracks), "youtube")
 
 
@@ -236,7 +393,7 @@ async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
 
     await wait_for_lavalink_voice(player)
     track = player.queue.get()
-    await player.play(track, volume=player.volume or 100)
+    await player.play(track, volume=player.volume or default_volume())
     return track
 
 
