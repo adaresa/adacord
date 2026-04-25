@@ -46,6 +46,12 @@ docker compose up -d --build
 
 The bot connects to Lavalink at `http://lavalink:2333` inside Docker.
 
+## Remote Deployment
+
+GitHub Actions workflows are included for PR checks and automatic deploys from `main` to a VPS over SSH.
+
+See [docs/deploy.md](docs/deploy.md) for the server setup, required GitHub secrets, and deploy flow.
+
 ## Local Development
 
 Install dependencies:
