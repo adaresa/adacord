@@ -15,6 +15,7 @@ plugins:
       - ANDROID_VR
       - WEB
       - WEBEMBEDDED
+      - TVHTML5_SIMPLY
       - TV
     oauth:
       enabled: ${YOUTUBE_OAUTH_ENABLED:false}
