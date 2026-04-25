@@ -438,7 +438,8 @@ async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
 
     await wait_for_lavalink_voice(player)
     track = player.queue.get()
-    await player.play(track, volume=player.volume or default_volume())
+    volume = player.volume if player.volume is not None else default_volume()
+    await player.play(track, volume=volume)
     return track
 
 
