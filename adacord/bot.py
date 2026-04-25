@@ -33,6 +33,10 @@ class AdacordBot(commands.Bot):
             self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
             logger.info("Synced %s slash commands to guild %s", len(synced), guild_id)
+
+            self.tree.clear_commands(guild=None)
+            synced_global = await self.tree.sync()
+            logger.info("Cleared %s global slash commands", len(synced_global))
         else:
             synced = await self.tree.sync()
             logger.info("Synced %s global slash commands", len(synced))

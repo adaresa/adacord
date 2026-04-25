@@ -15,6 +15,16 @@ plugins:
       - ANDROID_VR
       - WEB
       - WEBEMBEDDED
+      - TVHTML5_SIMPLY
+      - TV
+    oauth:
+      enabled: ${YOUTUBE_OAUTH_ENABLED:false}
+      refreshToken: "${YOUTUBE_OAUTH_REFRESH_TOKEN:}"
+      skipInitialization: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:true}
+    remoteCipher:
+      url: "http://yt-cipher:8001"
+      password: "${YOUTUBE_CIPHER_PASSWORD:adacord-cipher}"
+      userAgent: "adacord"
   lavasrc:
     providers:
       - "ytsearch:\"%ISRC%\""
@@ -85,6 +95,7 @@ logging:
   level:
     root: INFO
     lavalink: INFO
+    dev.lavalink.youtube.http.YoutubeOauth2Handler: INFO
   request:
     enabled: false
   file:

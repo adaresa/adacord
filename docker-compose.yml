@@ -1,4 +1,13 @@
 services:
+  yt-cipher:
+    image: ghcr.io/kikkia/yt-cipher:master
+    container_name: adacord-yt-cipher
+    restart: unless-stopped
+    environment:
+      API_TOKEN: ${YOUTUBE_CIPHER_PASSWORD:-adacord-cipher}
+    expose:
+      - "8001"
+
   lavalink:
     image: ghcr.io/lavalink-devs/lavalink:4.2.2-alpine
     container_name: adacord-lavalink
@@ -6,6 +15,10 @@ services:
     environment:
       _JAVA_OPTIONS: "-Xmx512M"
       LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-youshallnotpass}
+      YOUTUBE_OAUTH_ENABLED: ${YOUTUBE_OAUTH_ENABLED:-false}
+      YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
+      YOUTUBE_OAUTH_SKIP_INITIALIZATION: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:-true}
+      YOUTUBE_CIPHER_PASSWORD: ${YOUTUBE_CIPHER_PASSWORD:-adacord-cipher}
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
     expose:
@@ -15,6 +28,8 @@ services:
       interval: 20s
       timeout: 5s
       retries: 10
+    depends_on:
+      - yt-cipher
 
   bot:
     build: .

@@ -6,6 +6,8 @@ __pycache__/
 
 # Environment
 .env
+.env.*
+!.env.example
 bot.log
 AGENTS.md
 

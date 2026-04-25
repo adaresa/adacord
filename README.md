@@ -11,7 +11,7 @@ The bot handles Discord commands and queue controls. Lavalink handles track load
 - Spotify playlist links via public playlist metadata and YouTube Music resolution
 - Queue, skip, pause, resume, clear, shuffle, remove, move, loop, volume, and disconnect commands
 - Persistent Discord control panel
-- Docker Compose setup with separate bot and Lavalink services
+- Docker Compose setup with separate bot, Lavalink, and YouTube cipher services
 
 ## Commands
 
@@ -47,6 +47,12 @@ docker compose up -d --build
 
 The bot connects to Lavalink at `http://lavalink:2333` inside Docker.
 
+## Remote Deployment
+
+GitHub Actions workflows are included for PR checks and automatic deploys from `main` to a VPS over SSH.
+
+See [docs/deploy.md](docs/deploy.md) for the server setup, required GitHub secrets, and deploy flow.
+
 ## Local Development
 
 Install dependencies:
@@ -71,8 +77,8 @@ Check container status and logs:
 
 ```bash
 docker compose ps
-docker compose logs --tail=120 bot lavalink
-docker compose logs -f bot lavalink
+docker compose logs --tail=120 bot lavalink yt-cipher
+docker compose logs -f bot lavalink yt-cipher
 ```
 
 Stop the local stack:
