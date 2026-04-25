@@ -129,6 +129,45 @@ docker image prune -f
 
 The `.env` file is untracked, so it remains on the server across deploys.
 
+## Branch Flow
+
+Use `dev` for day-to-day changes and `main` for the deployed bot.
+
+```bash
+git switch dev
+# make changes, test locally, push dev
+git push origin dev
+```
+
+When a batch of changes is ready, open a pull request from `dev` to `main`. Merging to `main` is what triggers the VPS deploy.
+
+## Local Bot Testing
+
+Do not run a local bot with the production `DISCORD_TOKEN` while the VPS bot is running. Discord allows only one active gateway session per bot token, so the local process and VPS process will fight each other.
+
+Recommended setup:
+
+- Create a second Discord application/bot for development.
+- Invite the dev bot to the same server, ideally with a distinct name/avatar.
+- Keep a local-only `.env.dev` or alternate `.env` containing the dev bot token.
+- Use the same `DISCORD_GUILD_ID` so slash commands sync instantly to your server.
+- Stop the local dev bot after testing; production keeps running on the VPS.
+
+For local Docker testing, copy `.env.example` to `.env` and use the dev bot token:
+
+```bash
+docker compose up -d --build
+docker compose logs -f bot lavalink yt-cipher
+```
+
+If you only need static validation, run the checks without starting a Discord session:
+
+```bash
+python -m py_compile bot.py audio.py commands.py source_utils.py test_extractor.py
+python test_extractor.py
+docker compose config --no-interpolate
+```
+
 ## Checks
 
 Pull requests and pushes to `main` run `.github/workflows/ci.yml`:
