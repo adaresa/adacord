@@ -8,7 +8,7 @@ The bot handles Discord commands and queue controls. Lavalink handles track load
 
 - YouTube URL and search playback
 - Balanced YouTube Music search ranking to prefer song-like results over long or generic videos
-- Spotify playlist links through LavaSrc, with optional Spotipy metadata fallback
+- Spotify playlist links via public playlist metadata and YouTube Music resolution
 - Queue, skip, pause, resume, clear, shuffle, remove, move, loop, volume, and disconnect commands
 - Persistent Discord control panel
 - Docker Compose setup with separate bot and Lavalink services
@@ -36,10 +36,9 @@ The bot handles Discord commands and queue controls. Lavalink handles track load
 1. Copy `.env.example` to `.env`.
 2. Set `DISCORD_TOKEN`.
 3. Optionally set `DISCORD_GUILD_ID` for instant slash-command syncing to one server.
-4. Optionally set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` for Spotify playlist fallback.
-5. Optionally set `MESSAGE_DELETE_AFTER` to control transient bot message cleanup in seconds. Use `0` to keep confirmations.
-6. Optionally set `DEFAULT_VOLUME` from `0` to `200`. The default is `50`.
-7. Start everything:
+4. Optionally set `MESSAGE_DELETE_AFTER` to control transient bot message cleanup in seconds. Use `0` to keep confirmations.
+5. Optionally set `DEFAULT_VOLUME` from `0` to `200`. The default is `50`.
+6. Start everything:
 
 ```bash
 docker compose up -d --build

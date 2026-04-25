@@ -1,9 +1,13 @@
 import asyncio
+import html
+import json
 import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Iterable
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import discord
 import wavelink
@@ -18,6 +22,7 @@ SONG_MIN_LENGTH_MS = 60_000
 SONG_IDEAL_MAX_LENGTH_MS = 7 * 60_000
 SONG_SOFT_MAX_LENGTH_MS = 10 * 60_000
 DEFAULT_VOLUME = 50
+SPOTIFY_PUBLIC_FETCH_TIMEOUT = 10
 
 SONG_HINT_TERMS = {
     "audio",
@@ -208,8 +213,20 @@ def track_source_text(track: wavelink.Playable) -> str:
     return str(source).lower()
 
 
+def display_track_author(track: wavelink.Playable) -> str:
+    author = str(getattr(track, "author", "") or "").strip()
+    for suffix in (" - Topic", "VEVO"):
+        if author.endswith(suffix):
+            author = author[: -len(suffix)].strip()
+    return author
+
+
 def display_track_title(track: wavelink.Playable, query: str | None = None) -> str:
     title = getattr(track, "title", "") or "Unknown track"
+    author = display_track_author(track)
+    if author and normalized_words(author) - normalized_words(title):
+        title = f"{author} - {title}"
+
     if not query:
         return title
 
@@ -293,53 +310,75 @@ async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
     return tracks
 
 
-async def spotify_playlist_queries(playlist_id: str) -> list[str]:
-    client_id = os.getenv("SPOTIFY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        raise RuntimeError(
-            "Spotify playlist fallback needs SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET."
-        )
+def spotify_query_from_parts(title: str | None, artists: str | None) -> str | None:
+    if not title:
+        return None
+    return f"{artists} - {title}" if artists else title
 
+
+async def spotify_public_playlist_queries(playlist_id: str) -> list[str]:
     def fetch() -> list[str]:
-        import spotipy
-        from spotipy.oauth2 import SpotifyClientCredentials
-
-        spotify = spotipy.Spotify(
-            auth_manager=SpotifyClientCredentials(
-                client_id=client_id,
-                client_secret=client_secret,
-            )
+        url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml",
+            },
         )
+
+        with urlopen(request, timeout=SPOTIFY_PUBLIC_FETCH_TIMEOUT) as response:
+            body = response.read().decode("utf-8", errors="replace")
+
+        match = re.search(
+            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+            body,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return []
+
+        data = json.loads(html.unescape(match.group(1)))
+        entity = (
+            data.get("props", {})
+            .get("pageProps", {})
+            .get("state", {})
+            .get("data", {})
+            .get("entity", {})
+        )
+        tracks = entity.get("trackList") or []
 
         queries: list[str] = []
-        offset = 0
-        while True:
-            page = spotify.playlist_items(
-                playlist_id,
-                fields="items(is_local,track(name,artists(name))),next",
-                additional_types=("track",),
-                limit=100,
-                offset=offset,
-            )
-            for item in page.get("items", []):
-                if item.get("is_local"):
-                    continue
-                track = item.get("track") or {}
-                title = track.get("name")
-                artists = ", ".join(
-                    artist.get("name", "")
-                    for artist in track.get("artists", [])
-                    if artist.get("name")
-                )
-                if title:
-                    queries.append(f"{artists} - {title}" if artists else title)
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            if track.get("entityType") != "track":
+                continue
+            if track.get("isPlayable") is False:
+                continue
+            query = spotify_query_from_parts(track.get("title"), track.get("subtitle"))
+            if query:
+                queries.append(query)
+        return queries
 
-            if not page.get("next"):
-                return queries
-            offset += 100
+    try:
+        return await asyncio.to_thread(fetch)
+    except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+        logger.info("Spotify public playlist metadata load failed: %s", exc)
+        return []
 
-    return await asyncio.to_thread(fetch)
+
+async def spotify_playlist_queries(playlist_id: str) -> list[str]:
+    queries = await spotify_public_playlist_queries(playlist_id)
+    if not queries:
+        raise RuntimeError("Could not read track metadata from this public Spotify playlist.")
+
+    logger.info("Loaded %s Spotify tracks from public embed metadata", len(queries))
+    return queries
 
 
 async def load_tracks(query: str, requester: str) -> tuple[list[wavelink.Playable], LoadSummary]:
@@ -348,25 +387,31 @@ async def load_tracks(query: str, requester: str) -> tuple[list[wavelink.Playabl
 
     if playlist_id:
         try:
+            queries = await spotify_playlist_queries(playlist_id)
+            tracks: list[wavelink.Playable] = []
+            for track_query in queries:
+                try:
+                    matches = await search_youtube(track_query, requester)
+                except Exception as exc:
+                    logger.warning("Could not resolve Spotify track %r: %s", track_query, exc)
+                    continue
+                tracks.extend(matches)
+
+            if tracks:
+                return tracks, LoadSummary("Spotify playlist", len(tracks), "spotify-public")
+        except Exception as exc:
+            logger.info("Spotify public playlist metadata load failed; trying LavaSrc: %s", exc)
+
+        try:
             found = await wavelink.Playable.search(query)
             if isinstance(found, wavelink.Playlist) and found.tracks:
                 tracks = list(found.tracks)
                 apply_requester(tracks, requester, query)
                 return tracks, LoadSummary(found.name or "Spotify playlist", len(tracks), "lavasrc")
         except Exception as exc:
-            logger.info("LavaSrc Spotify load failed; trying Spotipy fallback: %s", exc)
+            logger.info("LavaSrc Spotify load failed: %s", exc)
 
-        queries = await spotify_playlist_queries(playlist_id)
-        tracks: list[wavelink.Playable] = []
-        for track_query in queries:
-            try:
-                matches = await search_youtube(track_query, requester)
-            except Exception as exc:
-                logger.warning("Could not resolve Spotify track %r: %s", track_query, exc)
-                continue
-            tracks.extend(matches)
-
-        return tracks, LoadSummary("Spotify playlist", len(tracks), "spotify-youtube")
+        raise RuntimeError("Could not load that Spotify playlist.")
 
     tracks = await search_youtube(query, requester)
     title = display_track_title(tracks[0], query) if tracks else query
