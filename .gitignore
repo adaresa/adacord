@@ -6,10 +6,13 @@ __pycache__/
 
 # Environment
 .env
+bot.log
 
 # Docker
 *.db
 *.sqlite3
+lavalink/plugins/
+lavalink/logs/
 dist/
 build/
 *.egg-info/

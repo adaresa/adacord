@@ -1,315 +1,483 @@
-import os
-import yt_dlp
 import asyncio
+import html
+import json
 import logging
-from collections import deque
-from dataclasses import dataclass
-from typing import Optional, Dict, Any, Tuple
-import discord
-from discord.ext import commands as dpy_commands
-import aiohttp
+import os
 import re
+from dataclasses import dataclass, field
+from typing import Iterable
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+import discord
+import wavelink
+
+from source_utils import format_duration, is_url, spotify_playlist_id
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class Track:
-    url: str
-    title: str
-    duration: Optional[int] = None
-    requester: Optional[str] = None
-    stream_url: Optional[str] = None
-    stream_headers: Optional[Dict[str, str]] = None
+
+SONG_SEARCH_LIMIT = 8
+SONG_MIN_LENGTH_MS = 60_000
+SONG_IDEAL_MAX_LENGTH_MS = 7 * 60_000
+SONG_SOFT_MAX_LENGTH_MS = 10 * 60_000
+DEFAULT_VOLUME = 50
+SPOTIFY_PUBLIC_FETCH_TIMEOUT = 10
+
+SONG_HINT_TERMS = {
+    "audio",
+    "lyrics",
+    "lyric",
+    "official audio",
+    "official lyric",
+    "provided to youtube",
+    "topic",
+}
+AVOID_TERMS = {
+    "extended",
+    "hour",
+    "hours",
+    "loop",
+    "looped",
+    "mix",
+    "compilation",
+    "live",
+    "concert",
+    "reaction",
+    "tutorial",
+    "karaoke",
+    "instrumental",
+    "bass boosted",
+    "nightcore",
+    "slowed",
+    "reverb",
+    "remix",
+}
+
 
 @dataclass
 class GuildState:
-    queue: deque
-    text_channel: Optional[discord.TextChannel] = None
-    current_track: Optional[Track] = None
-    is_playing: bool = False
-    is_paused: bool = False
-    loop_mode: str = 'none'
-    volume: float = 1.0
-    volume_transformer: Optional[discord.PCMVolumeTransformer] = None
-    display_message: Optional[discord.Message] = None
-    display_channel: Optional[discord.TextChannel] = None
-    previous_volume: float = 1.0  # for mute/unmute functionality
+    text_channel: discord.abc.Messageable | None = None
+    display_message: discord.Message | None = None
+    display_channel: discord.abc.Messageable | None = None
+    loop_mode: str = "none"
+    previous_volume: int = DEFAULT_VOLUME
+    connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    idle_task: asyncio.Task[None] | None = None
 
-guild_states: Dict[int, GuildState] = {}
+
+@dataclass(frozen=True)
+class LoadSummary:
+    title: str
+    added: int
+    source: str
+
+
+guild_states: dict[int, GuildState] = {}
+
+
+def default_volume() -> int:
+    raw_value = os.getenv("DEFAULT_VOLUME", str(DEFAULT_VOLUME)).strip()
+    try:
+        return max(0, min(200, int(raw_value)))
+    except ValueError:
+        return DEFAULT_VOLUME
+
 
 def get_guild_state(guild_id: int) -> GuildState:
     if guild_id not in guild_states:
-        guild_states[guild_id] = GuildState(queue=deque())
+        guild_states[guild_id] = GuildState()
     return guild_states[guild_id]
 
-def is_url(string: str) -> bool:
-    return re.match(r'https?://', string) is not None
 
-class AudioExtractor:
-    def __init__(self):
-        self.ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-            'default_search': 'ytsearch1',
-            'extractaudio': True,
-            'audioformat': 'mp3',
-            'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-            'geo_bypass': True,
-            'ignoreerrors': True,
-            'nocheckcertificate': True,
-            'cachedir': False,
-            'source_address': '0.0.0.0',  # force IPv4 to avoid some 403s on IPv6-only routes
-            'http_headers': {
-                'User-Agent': (
-                    'Mozilla/5.0 (Linux; Android 10; SM-G975F) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/124.0.0.0 Mobile Safari/537.36'
-                ),
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': '*/*',
-                'Origin': 'https://www.youtube.com',
-                'Referer': 'https://www.youtube.com/',
-            },
-            # Prefer Android client to avoid some age/region restrictions and 403s
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android']
-                }
-            },
-        }
+async def connect_lavalink(bot: discord.Client) -> None:
+    uri = os.getenv("LAVALINK_URI", "http://lavalink:2333")
+    password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+    retries = int(os.getenv("LAVALINK_CONNECT_RETRIES", "30"))
+    delay = float(os.getenv("LAVALINK_CONNECT_DELAY", "2"))
 
-        # Optional cookies for restricted videos
-        cookies_path = os.getenv('YTDLP_COOKIES')
-        if cookies_path and os.path.exists(cookies_path):
-            self.ydl_opts['cookiefile'] = cookies_path
-    
-    async def extract_info(self, query: str, download: bool = False) -> Dict[str, Any]:
-        """Extract video info with timeout and error handling"""
-        loop = asyncio.get_event_loop()
-        
+    node = wavelink.Node(uri=uri, password=password)
+    for attempt in range(1, retries + 1):
         try:
-            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                info = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: ydl.extract_info(query, download=download)),
-                    timeout=15
-                )
-                return info
-        except asyncio.TimeoutError:
-            raise Exception("Request timed out")
-        except Exception as e:
-            raise Exception(f"Extraction failed: {str(e)[:100]}")
-    
-    async def get_stream_url(self, query: str) -> Tuple[str, Dict[str, str]]:
-        """Get direct stream URL and required HTTP headers without downloading"""
-        # If a raw URL is passed, prefer that directly; otherwise rely on ytsearch1
-        info = await self.extract_info(query, download=False)
-        
-        if 'entries' in info and info['entries']:
-            entry = info['entries'][0]
-        else:
-            entry = info
-        
-        # yt-dlp may provide required HTTP headers that must be forwarded to ffmpeg
-        http_headers: Dict[str, str] = entry.get('http_headers') or info.get('http_headers') or {}
-
-        # Get the best audio stream URL
-        if 'url' in entry:
-            return entry['url'], http_headers
-        
-        # Fallback to formats if direct URL not available
-        formats = entry.get('formats', [])
-        audio_formats = [f for f in formats if (f.get('acodec') and f.get('acodec') != 'none')]
-        
-        if audio_formats:
-            # Prefer highest quality audio
-            best_audio = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
-            return best_audio['url'], http_headers
-
-        # If formats missing (common for some search results), try re-extracting via webpage_url
-        webpage_url = entry.get('webpage_url') or entry.get('url')
-        if webpage_url and not is_url(query):
-            info2 = await self.extract_info(webpage_url, download=False)
-            if 'entries' in info2 and info2['entries']:
-                entry2 = info2['entries'][0]
-            else:
-                entry2 = info2
-
-            http_headers = entry2.get('http_headers') or info2.get('http_headers') or http_headers
-            formats2 = entry2.get('formats', [])
-            audio_formats2 = [f for f in formats2 if (f.get('acodec') and f.get('acodec') != 'none')]
-            if audio_formats2:
-                best_audio = max(audio_formats2, key=lambda x: x.get('abr', 0) or 0)
-                return best_audio['url'], http_headers
-        
-        raise Exception("No audio stream found")
-
-extractor = AudioExtractor()
-
-async def fetch_track_info(query: str, requester: str = None) -> Track:
-    """Fetch comprehensive track information"""
-    try:
-        info = await extractor.extract_info(query, download=False)
-        
-        if 'entries' in info and info['entries']:
-            entry = info['entries'][0]
-        else:
-            entry = info
-        
-        return Track(
-            url=query,
-            title=entry.get('title', query),
-            duration=entry.get('duration'),
-            requester=requester
-        )
-    
-    except Exception as e:
-        logger.debug(f"Info fetch failed for {query}: {str(e)[:100]}")        
-        return Track(url=query, title=query, requester=requester)
-
-async def play_next(guild_id: int, vc: discord.VoiceClient, bot: 'dpy_commands.Bot'):
-    """Enhanced play_next with real-time volume control"""
-    state = get_guild_state(guild_id)
-    
-    # Import here to avoid circular import
-    from commands import update_display_for_guild
-    
-    # Verify connection
-    if not vc or not vc.is_connected():
-        state.is_playing = False
-        state.current_track = None
-        state.volume_transformer = None
-        await update_display_for_guild(guild_id)
-        return
-    
-    # Handle loop modes
-    if state.loop_mode == 'track' and state.current_track:
-        next_track = state.current_track
-    elif state.queue:
-        next_track = state.queue.popleft()
-        if state.loop_mode == 'queue' and state.current_track:
-            state.queue.append(state.current_track)
-    else:
-        # Queue empty
-        state.is_playing = False
-        state.current_track = None
-        state.volume_transformer = None
-        
-        # Update display to show empty state
-        await update_display_for_guild(guild_id)
-        
-        # Auto-disconnect logic
-        await asyncio.sleep(30)
-        if not state.queue and vc and vc.is_connected() and not vc.is_playing():
-            await vc.disconnect()
-            # Clean up display
-            if state.display_message:
-                try:
-                    await state.display_message.delete()
-                except:
-                    pass
-                state.display_message = None
-                state.display_channel = None
-        return
-    
-    state.current_track = next_track
-    
-    try:
-        # Get stream URL and headers
-        stream_url, stream_headers = await extractor.get_stream_url(next_track.url)
-        next_track.stream_url = stream_url
-        next_track.stream_headers = stream_headers
-        
-        if state.text_channel:
-            await state.text_channel.send(f"🎵 Now playing: **{next_track.title}**", delete_after=2)
-        
-    except Exception as e:
-        logger.error(f"Failed to get stream for {next_track.title}: {str(e)[:200]}")
-        if state.text_channel:
-            await state.text_channel.send(f"❌ Failed to play: **{next_track.title}**")
-        await play_next(guild_id, vc, bot)
-    
-    # Verify connection again
-    if not vc or not vc.is_connected():
-        state.is_playing = False
-        state.current_track = None
-        state.volume_transformer = None
-        await update_display_for_guild(guild_id)
-        return
-    
-    def after_playing(error):
-        if error:
-            logger.error(f"Playback error: {error}")
-        
-        # Clear volume transformer reference
-        state.volume_transformer = None
-        
-        # Queue next track
-        if vc and vc.is_connected():
-            fut = asyncio.run_coroutine_threadsafe(play_next(guild_id, vc, bot), bot.loop)
-            try:
-                fut.result()
-            except Exception as exc:
-                logger.error(f"Error queuing next: {exc}")
-        else:
-            state.is_playing = False
-            state.current_track = None
-    
-    try:
-        # Build headers for ffmpeg (pass both -user_agent/-referer and -headers)
-        ua = None
-        ref = None
-        headers_option_parts = []
-        if next_track.stream_headers:
-            ua = next_track.stream_headers.get('User-Agent')
-            ref = next_track.stream_headers.get('Referer') or next_track.stream_headers.get('Referer'.lower())
-            headers_lines = ''.join(f"{k}: {v}\r\n" for k, v in next_track.stream_headers.items())
-            headers_option_parts.append(f'-headers "{headers_lines}"')
-        if not ua:
-            ua = (
-                'Mozilla/5.0 (Linux; Android 10; SM-G975F) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/124.0.0.0 Mobile Safari/537.36'
+            await wavelink.Pool.connect(client=bot, nodes=[node], cache_capacity=100)
+            logger.info("Connected to Lavalink at %s", uri)
+            return
+        except Exception as exc:
+            logger.warning(
+                "Lavalink connection attempt %s/%s failed: %s",
+                attempt,
+                retries,
+                exc,
             )
-        if not ref:
-            ref = 'https://www.youtube.com/'
-        headers_option_parts.insert(0, f'-user_agent "{ua}"')
-        headers_option_parts.insert(1, f'-referer "{ref}"')
-        headers_option = ' '.join(headers_option_parts) + ' '
+            await asyncio.sleep(delay)
 
-        ffmpeg_options = {
-            'before_options': (
-                f"{headers_option}-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
-                '-nostdin'
-            ),
-            'options': '-vn -b:a 128k'
+    raise RuntimeError(f"Could not connect to Lavalink at {uri}")
+
+
+def get_player(guild: discord.Guild) -> wavelink.Player | None:
+    player = guild.voice_client
+    return player if isinstance(player, wavelink.Player) else None
+
+
+async def ensure_player(
+    guild: discord.Guild,
+    target_channel: discord.VoiceChannel | discord.StageChannel,
+) -> wavelink.Player:
+    state = get_guild_state(guild.id)
+    async with state.connect_lock:
+        player = get_player(guild)
+        if player and player.connected:
+            if player.channel != target_channel:
+                await player.move_to(target_channel)
+            await wait_for_lavalink_voice(player)
+            return player
+
+        player = await target_channel.connect(
+            cls=wavelink.Player,
+            self_deaf=True,
+            reconnect=True,
+            timeout=15,
+        )
+        player.inactive_timeout = int(os.getenv("PLAYER_IDLE_TIMEOUT", "30"))
+        player.inactive_channel_tokens = 1
+        await wait_for_lavalink_voice(player)
+        await player.set_volume(default_volume())
+        return player
+
+
+async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
+    timeout = float(os.getenv("LAVALINK_VOICE_READY_TIMEOUT", "10"))
+    interval = float(os.getenv("LAVALINK_VOICE_READY_INTERVAL", "0.25"))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+
+    while True:
+        try:
+            payload = await player.node.fetch_player_info(player.guild.id)
+        except Exception as exc:
+            logger.debug("Could not fetch Lavalink player info while waiting for voice: %s", exc)
+            payload = None
+
+        if payload and payload.state.connected:
+            return
+
+        if loop.time() >= deadline:
+            state = "missing"
+            if payload:
+                state = f"connected={payload.state.connected}, ping={payload.state.ping}"
+            raise RuntimeError(f"Lavalink did not finish connecting to voice ({state}).")
+
+        await asyncio.sleep(interval)
+
+
+def apply_requester(tracks: Iterable[wavelink.Playable], requester: str, query: str) -> None:
+    for track in tracks:
+        track.extras = {
+            "requester": requester,
+            "query": query,
+            "display_title": display_track_title(track, query),
         }
-        
-        # Create base audio source
-        source = discord.FFmpegPCMAudio(stream_url, **ffmpeg_options)
-        
-        # Wrap with PCMVolumeTransformer for real-time volume control
-        volume_source = discord.PCMVolumeTransformer(source, volume=state.volume)
-        state.volume_transformer = volume_source
-        
-        vc.play(volume_source, after=after_playing)
-        state.is_playing = True
-        
-        # Update display
-        await update_display_for_guild(guild_id)
-        
-    except Exception as e:
-        logger.error(f"Failed to play stream: {e}")
-        after_playing(e)
 
-def set_volume(guild_id: int, volume: float) -> bool:
-    """Set volume for currently playing track without stopping playback"""
-    state = get_guild_state(guild_id)
-    state.volume = volume
-    
-    # Apply to current transformer if playing
-    if state.volume_transformer:
-        state.volume_transformer.volume = volume
-        return True
-    return False
+
+def normalized_words(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def text_contains_term(text: str, term: str) -> bool:
+    words = r"\s+".join(re.escape(word) for word in term.split())
+    return bool(re.search(rf"\b{words}\b", text))
+
+
+def avoid_terms_for_query(query: str) -> set[str]:
+    query_text = query.lower()
+    return {term for term in AVOID_TERMS if not text_contains_term(query_text, term)}
+
+
+def requested_variant_terms(query: str) -> set[str]:
+    return AVOID_TERMS - avoid_terms_for_query(query)
+
+
+def requested_display_variants(query: str) -> list[str]:
+    query_text = query.lower()
+    return sorted(term for term in AVOID_TERMS if text_contains_term(query_text, term))
+
+
+def track_text(track: wavelink.Playable) -> str:
+    title = getattr(track, "title", "") or ""
+    author = getattr(track, "author", "") or ""
+    return f"{title} {author}".lower()
+
+
+def track_source_text(track: wavelink.Playable) -> str:
+    source = getattr(track, "source", "") or ""
+    return str(source).lower()
+
+
+def display_track_author(track: wavelink.Playable) -> str:
+    author = str(getattr(track, "author", "") or "").strip()
+    for suffix in (" - Topic", "VEVO"):
+        if author.endswith(suffix):
+            author = author[: -len(suffix)].strip()
+    return author
+
+
+def display_track_title(track: wavelink.Playable, query: str | None = None) -> str:
+    title = getattr(track, "title", "") or "Unknown track"
+    author = display_track_author(track)
+    if author and normalized_words(author) - normalized_words(title):
+        title = f"{author} - {title}"
+
+    if not query:
+        return title
+
+    title_text = title.lower()
+    variants = [
+        term
+        for term in requested_display_variants(query)
+        if not text_contains_term(title_text, term)
+    ]
+    if not variants:
+        return title
+
+    return f"{title} ({', '.join(variants)})"
+
+
+def score_song_candidate(track: wavelink.Playable, query: str) -> int:
+    text = track_text(track)
+    score = 0
+
+    query_words = normalized_words(query)
+    track_words = normalized_words(text)
+    if query_words:
+        score += int(40 * len(query_words & track_words) / len(query_words))
+
+    if any(text_contains_term(text, term) for term in SONG_HINT_TERMS):
+        score += 20
+    if track_source_text(track) in {"youtube music", "youtubemusic", "ytm"}:
+        score += 10
+
+    length = getattr(track, "length", None)
+    if length:
+        if SONG_MIN_LENGTH_MS <= length <= SONG_IDEAL_MAX_LENGTH_MS:
+            score += 25
+        elif length <= SONG_SOFT_MAX_LENGTH_MS:
+            score += 5
+        else:
+            score -= min(50, (length - SONG_SOFT_MAX_LENGTH_MS) // 60_000 * 5 + 15)
+
+    avoid_hits = [term for term in avoid_terms_for_query(query) if text_contains_term(text, term)]
+    score -= 30 * len(avoid_hits)
+    variant_hits = [term for term in requested_variant_terms(query) if text_contains_term(text, term)]
+    score += 25 * len(variant_hits)
+    return score
+
+
+def choose_best_song_candidate(
+    tracks: Iterable[wavelink.Playable],
+    query: str,
+) -> wavelink.Playable | None:
+    candidates = list(tracks)
+    if not candidates:
+        return None
+
+    ranked = sorted(
+        enumerate(candidates),
+        key=lambda item: (score_song_candidate(item[1], query), -item[0]),
+        reverse=True,
+    )
+    best = ranked[0][1]
+    best_score = score_song_candidate(best, query)
+    first_score = score_song_candidate(candidates[0], query)
+
+    if best_score < -20 and first_score >= best_score - 10:
+        return candidates[0]
+    return best
+
+
+async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
+    source = None if is_url(query) else wavelink.TrackSource.YouTubeMusic
+    found = await wavelink.Playable.search(query, source=source)
+
+    if isinstance(found, wavelink.Playlist):
+        tracks = list(found.tracks)
+    elif is_url(query):
+        tracks = list(found[:1])
+    else:
+        candidate = choose_best_song_candidate(list(found[:SONG_SEARCH_LIMIT]), query)
+        tracks = [candidate] if candidate else []
+
+    apply_requester(tracks, requester, query)
+    return tracks
+
+
+def spotify_query_from_parts(title: str | None, artists: str | None) -> str | None:
+    if not title:
+        return None
+    return f"{artists} - {title}" if artists else title
+
+
+async def spotify_public_playlist_queries(playlist_id: str) -> list[str]:
+    def fetch() -> list[str]:
+        url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+
+        with urlopen(request, timeout=SPOTIFY_PUBLIC_FETCH_TIMEOUT) as response:
+            body = response.read().decode("utf-8", errors="replace")
+
+        match = re.search(
+            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+            body,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return []
+
+        data = json.loads(html.unescape(match.group(1)))
+        entity = (
+            data.get("props", {})
+            .get("pageProps", {})
+            .get("state", {})
+            .get("data", {})
+            .get("entity", {})
+        )
+        tracks = entity.get("trackList") or []
+
+        queries: list[str] = []
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            if track.get("entityType") != "track":
+                continue
+            if track.get("isPlayable") is False:
+                continue
+            query = spotify_query_from_parts(track.get("title"), track.get("subtitle"))
+            if query:
+                queries.append(query)
+        return queries
+
+    try:
+        return await asyncio.to_thread(fetch)
+    except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+        logger.info("Spotify public playlist metadata load failed: %s", exc)
+        return []
+
+
+async def spotify_playlist_queries(playlist_id: str) -> list[str]:
+    queries = await spotify_public_playlist_queries(playlist_id)
+    if not queries:
+        raise RuntimeError("Could not read track metadata from this public Spotify playlist.")
+
+    logger.info("Loaded %s Spotify tracks from public embed metadata", len(queries))
+    return queries
+
+
+async def load_tracks(query: str, requester: str) -> tuple[list[wavelink.Playable], LoadSummary]:
+    query = query.strip()
+    playlist_id = spotify_playlist_id(query)
+
+    if playlist_id:
+        try:
+            queries = await spotify_playlist_queries(playlist_id)
+            tracks: list[wavelink.Playable] = []
+            for track_query in queries:
+                try:
+                    matches = await search_youtube(track_query, requester)
+                except Exception as exc:
+                    logger.warning("Could not resolve Spotify track %r: %s", track_query, exc)
+                    continue
+                tracks.extend(matches)
+
+            if tracks:
+                return tracks, LoadSummary("Spotify playlist", len(tracks), "spotify-public")
+        except Exception as exc:
+            logger.info("Spotify public playlist metadata load failed; trying LavaSrc: %s", exc)
+
+        try:
+            found = await wavelink.Playable.search(query)
+            if isinstance(found, wavelink.Playlist) and found.tracks:
+                tracks = list(found.tracks)
+                apply_requester(tracks, requester, query)
+                return tracks, LoadSummary(found.name or "Spotify playlist", len(tracks), "lavasrc")
+        except Exception as exc:
+            logger.info("LavaSrc Spotify load failed: %s", exc)
+
+        raise RuntimeError("Could not load that Spotify playlist.")
+
+    tracks = await search_youtube(query, requester)
+    title = display_track_title(tracks[0], query) if tracks else query
+    return tracks, LoadSummary(title, len(tracks), "youtube")
+
+
+async def add_tracks(
+    player: wavelink.Player,
+    tracks: list[wavelink.Playable],
+    *,
+    start_playback: bool = True,
+) -> None:
+    if not tracks:
+        return
+
+    player.queue.put(tracks)
+    if start_playback and not player.playing and not player.paused:
+        await play_next(player)
+
+
+async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
+    if player.queue.is_empty:
+        return None
+
+    await wait_for_lavalink_voice(player)
+    track = player.queue.get()
+    volume = player.volume if player.volume is not None else default_volume()
+    await player.play(track, volume=volume)
+    return track
+
+
+async def set_volume(player: wavelink.Player, volume: int) -> None:
+    await player.set_volume(max(0, min(200, volume)))
+
+
+def set_loop_mode(player: wavelink.Player, mode: str) -> None:
+    if mode not in {"none", "track", "queue"}:
+        raise ValueError("loop mode must be one of: none, track, queue")
+
+    state = get_guild_state(player.guild.id)
+    state.loop_mode = mode
+
+    if mode == "track":
+        player.queue.mode = wavelink.QueueMode.loop
+    elif mode == "queue":
+        player.queue.mode = wavelink.QueueMode.loop_all
+    else:
+        player.queue.mode = wavelink.QueueMode.normal
+
+
+def queue_items(player: wavelink.Player) -> list[wavelink.Playable]:
+    return list(player.queue)
+
+
+async def clear_player(player: wavelink.Player) -> None:
+    set_loop_mode(player, "none")
+    player.queue.clear()
+    player.queue.history.clear()
+    if player.playing or player.paused:
+        await player.skip(force=True)
+
+
+async def disconnect_player(player: wavelink.Player) -> None:
+    state = get_guild_state(player.guild.id)
+    if state.idle_task:
+        state.idle_task.cancel()
+        state.idle_task = None
+    await clear_player(player)
+    await player.disconnect()

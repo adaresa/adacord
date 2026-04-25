@@ -1,862 +1,641 @@
-import discord
-from discord.ext import commands
-from discord import option
-from collections import deque
-from audio import get_guild_state, fetch_track_info, play_next, Track, set_volume
-import logging
 import asyncio
-from typing import Optional
-from datetime import datetime
-import random
+import logging
+import os
+from datetime import datetime, timezone
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+import wavelink
+
+from audio import (
+    add_tracks,
+    clear_player,
+    default_volume,
+    disconnect_player,
+    ensure_player,
+    format_duration,
+    get_guild_state,
+    get_player,
+    load_tracks,
+    play_next,
+    queue_items,
+    set_loop_mode,
+    set_volume,
+)
 
 logger = logging.getLogger(__name__)
 
-# ============= PERSISTENT DISPLAY CLASSES =============
 
-class PersistentControlPanel(discord.ui.View):
-    """Combined control panel with all music controls"""
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=None)  # No timeout for persistent view
-        self.guild_id = guild_id
-        self.last_update = datetime.now()
-    
-    def get_display_embed(self) -> discord.Embed:
-        """Generate the current display embed"""
-        state = get_guild_state(self.guild_id)
-        
-        # Determine embed color based on state
-        if not state.current_track:
-            color = discord.Color.dark_grey()
-        elif state.is_paused:
-            color = discord.Color.yellow()
-        else:
-            color = discord.Color.green()
-        
-        embed = discord.Embed(
-            title="🎵 Music Player",
-            color=color
-        )
-        
-        # Current track section
-        if state.current_track:
-            track = state.current_track
-            status_emoji = "⏸️" if state.is_paused else "▶️"
-            
-            # Track info with duration
-            track_info = f"{status_emoji} **{track.title}**"
-            if track.duration:
-                minutes, seconds = divmod(track.duration, 60)
-                track_info += f" `[{minutes}:{seconds:02d}]`"
-            
-            embed.add_field(
-                name="Now Playing",
-                value=track_info,
-                inline=False
-            )
-            
-            # Add requester if available
-            if track.requester:
-                embed.add_field(name="Requested by", value=track.requester, inline=True)
-        else:
-            embed.add_field(
-                name="Now Playing",
-                value="*Nothing playing*",
-                inline=False
-            )
-        
-        # Volume and loop status
-        volume_percentage = int(state.volume * 100)
-        volume_emoji = "🔇" if volume_percentage == 0 else "🔉" if volume_percentage < 50 else "🔊"
-        embed.add_field(
-            name="Volume",
-            value=f"{volume_emoji} {volume_percentage}%",
-            inline=True
-        )
-        
-        if state.loop_mode != 'none':
-            loop_emoji = "🔂" if state.loop_mode == 'track' else "🔁"
-            embed.add_field(
-                name="Loop",
-                value=f"{loop_emoji} {state.loop_mode.title()}",
-                inline=True
-            )
-        
-        # Queue preview (next 3 tracks)
-        if state.queue:
-            queue_preview = []
-            for i, track in enumerate(list(state.queue)[:3]):
-                duration_str = ""
-                if track.duration:
-                    m, s = divmod(track.duration, 60)
-                    duration_str = f" `[{m}:{s:02d}]`"
-                queue_preview.append(f"`{i+1}.` {track.title}{duration_str}")
-            
-            if len(state.queue) > 3:
-                queue_preview.append(f"*...and {len(state.queue) - 3} more*")
-            
-            embed.add_field(
-                name=f"Queue ({len(state.queue)} track{'s' if len(state.queue) != 1 else ''})",
-                value="\n".join(queue_preview),
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="Queue",
-                value="*Empty*",
-                inline=False
-            )
-        
-        # Footer with last update
-        embed.set_footer(text=f"Last updated")
-        embed.timestamp = self.last_update
-        
-        return embed
-    
-    # Playback controls row
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
-    async def restart_track(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Restart current track"""
-        vc = interaction.guild.voice_client
-        state = get_guild_state(self.guild_id)
-        
-        if vc and state.current_track:
-            # Re-queue current track at front
-            state.queue.appendleft(state.current_track)
-            vc.stop()
-            await interaction.response.send_message("⏮️ Restarting track!", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Nothing to restart!", ephemeral=True)
-    
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, row=0)
-    async def pause_resume(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Pause/Resume playback"""
-        vc = interaction.guild.voice_client
-        state = get_guild_state(self.guild_id)
-        
-        if not vc:
-            await interaction.response.send_message("❌ Not connected!", ephemeral=True)
-            return
-        
-        if vc.is_playing():
-            vc.pause()
-            state.is_paused = True
-            await interaction.response.send_message("⏸️ Paused!", ephemeral=True)
-        elif vc.is_paused():
-            vc.resume()
-            state.is_paused = False
-            await interaction.response.send_message("▶️ Resumed!", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Nothing to pause/resume!", ephemeral=True)
-        
-        # Update display
-        await update_display_for_guild(self.guild_id)
-    
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
-    async def skip_track(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Skip to next track"""
-        vc = interaction.guild.voice_client
-        
-        if vc and vc.is_playing():
-            logger.info(f"User '{interaction.user}' skipped track via control panel in guild '{interaction.guild.name}'.")
-            vc.stop()
-            await interaction.response.send_message("⏭️ Skipped!", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Nothing to skip!", ephemeral=True)
-    
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
-    async def stop_playback(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Stop and clear queue"""
-        vc = interaction.guild.voice_client
-        state = get_guild_state(self.guild_id)
-        
-        if vc:
-            logger.info(f"User '{interaction.user}' stopped playback via control panel in guild '{interaction.guild.name}'.")
-            vc.stop()
-            state.queue.clear()
-            state.current_track = None
-            state.is_playing = False
-            await interaction.response.send_message("⏹️ Stopped and cleared queue!", ephemeral=True, delete_after=3)
-            await update_display_for_guild(self.guild_id)
-        else:
-            await interaction.response.send_message("❌ Nothing to stop!", ephemeral=True)
-    
-    # Volume controls row
-    @discord.ui.button(emoji="🔉", label="-10%", style=discord.ButtonStyle.secondary, row=1)
-    async def volume_down(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        new_volume = max(0, state.volume - 0.1)
-        set_volume(self.guild_id, new_volume)
-        
-        await interaction.response.send_message(
-            f"🔉 Volume: {int(new_volume * 100)}%", 
-            ephemeral=True,
-            delete_after=3
-        )
-        await update_display_for_guild(self.guild_id)
-    
-    @discord.ui.button(emoji="🔊", label="+10%", style=discord.ButtonStyle.secondary, row=1)
-    async def volume_up(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        new_volume = min(2.0, state.volume + 0.1)
-        set_volume(self.guild_id, new_volume)
-        
-        await interaction.response.send_message(
-            f"🔊 Volume: {int(new_volume * 100)}%", 
-            ephemeral=True,
-            delete_after=3
-        )
-        await update_display_for_guild(self.guild_id)
-    
-    @discord.ui.button(emoji="🔇", label="Mute", style=discord.ButtonStyle.secondary, row=1)
-    async def mute_toggle(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        
-        if state.volume > 0:
-            state.previous_volume = state.volume
-            set_volume(self.guild_id, 0)
-            await interaction.response.send_message("🔇 Muted!", ephemeral=True)
-        else:
-            restore_vol = getattr(state, 'previous_volume', 1.0)
-            set_volume(self.guild_id, restore_vol)
-            await interaction.response.send_message(
-                f"🔊 Unmuted: {int(restore_vol * 100)}%", 
-                ephemeral=True
-            )
-        
-        await update_display_for_guild(self.guild_id)
-    
-    # Queue controls row
-    @discord.ui.button(emoji="🔀", label="Shuffle", style=discord.ButtonStyle.secondary, row=2)
-    async def shuffle_queue(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        
-        if not state.queue:
-            await interaction.response.send_message("❌ Queue is empty!", ephemeral=True)
-            return
-        
-        queue_list = list(state.queue)
-        random.shuffle(queue_list)
-        state.queue = deque(queue_list)
-        
-        await interaction.response.send_message(
-            f"🔀 Shuffled {len(queue_list)} tracks!", 
-            ephemeral=True,
-            delete_after=3
-        )
-        await update_display_for_guild(self.guild_id)
-    
-    @discord.ui.button(emoji="🔁", label="Loop", style=discord.ButtonStyle.secondary, row=2)
-    async def cycle_loop(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        
-        # Cycle through loop modes
-        modes = ['none', 'track', 'queue']
-        current_index = modes.index(state.loop_mode)
-        state.loop_mode = modes[(current_index + 1) % 3]
-        
-        mode_emoji = {"none": "➡️", "track": "🔂", "queue": "🔁"}
-        await interaction.response.send_message(
-            f"{mode_emoji[state.loop_mode]} Loop: {state.loop_mode.title()}", 
-            ephemeral=True
-        )
-        await update_display_for_guild(self.guild_id)
-    
-    @discord.ui.button(emoji="📜", label="Full Queue", style=discord.ButtonStyle.secondary, row=2)
-    async def show_queue(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Show full queue in ephemeral message"""
-        state = get_guild_state(self.guild_id)
-        
-        if not state.queue and not state.current_track:
-            await interaction.response.send_message("❌ Nothing in queue!", ephemeral=True)
-            return
-        
-        total_tracks = len(state.queue)
-        total_pages = max(1, (total_tracks + 9) // 10)
-        
-        view = QueueView(self.guild_id, total_pages)
-        embed = view.get_queue_embed(0)
-        
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+def message_delete_after() -> float:
+    raw_value = os.getenv("MESSAGE_DELETE_AFTER", "5").strip()
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return 5.0
 
-# ============= DISPLAY MANAGEMENT FUNCTIONS =============
 
-async def create_or_update_display(guild_id: int, channel: discord.TextChannel) -> Optional[discord.Message]:
-    """Create or update the persistent display"""
+async def delete_message_later(message: discord.Message, delay: float) -> None:
+    if delay <= 0:
+        return
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+
+
+def schedule_delete(message: discord.Message | None, delay: float) -> None:
+    if message and delay > 0:
+        asyncio.create_task(delete_message_later(message, delay))
+
+
+async def send_transient(
+    channel: discord.abc.Messageable,
+    message: str,
+) -> discord.Message | None:
+    delay = message_delete_after()
+    sent = await channel.send(message)
+    schedule_delete(sent, delay)
+    return sent
+
+
+def track_requester(track: wavelink.Playable) -> str | None:
+    try:
+        return track.extras.requester
+    except AttributeError:
+        return None
+
+
+def track_display_title(track: wavelink.Playable) -> str:
+    try:
+        return track.extras.display_title
+    except AttributeError:
+        return track.title
+
+
+def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
+    if not interaction.guild:
+        return None
+    return get_player(interaction.guild)
+
+
+async def respond(
+    interaction: discord.Interaction,
+    message: str,
+    *,
+    ephemeral: bool = False,
+) -> None:
+    delay = message_delete_after()
+    if interaction.response.is_done():
+        sent = await interaction.followup.send(
+            message,
+            ephemeral=ephemeral,
+            wait=not ephemeral and delay > 0,
+        )
+        if not ephemeral:
+            schedule_delete(sent, delay)
+    else:
+        await interaction.response.send_message(
+            message,
+            ephemeral=ephemeral,
+            delete_after=None if ephemeral else delay or None,
+        )
+
+
+def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord.Embed:
     state = get_guild_state(guild_id)
-    
-    # Create the view and embed
-    view = PersistentControlPanel(guild_id)
-    view.last_update = datetime.now()
-    embed = view.get_display_embed()
-    
+    current = player.current if player else None
+    paused = bool(player and player.paused)
+    color = discord.Color.dark_grey()
+    if current:
+        color = discord.Color.yellow() if paused else discord.Color.green()
+
+    embed = discord.Embed(title="Music Player", color=color, timestamp=datetime.now(timezone.utc))
+
+    if current:
+        duration = format_duration(current.length)
+        title = f"**{track_display_title(current)}**"
+        if duration:
+            title += f" `[{duration}]`"
+        embed.add_field(name="Now Playing", value=title, inline=False)
+        requester = track_requester(current)
+        if requester:
+            embed.add_field(name="Requested by", value=requester, inline=True)
+    else:
+        embed.add_field(name="Now Playing", value="Nothing playing", inline=False)
+
+    volume = player.volume if player else default_volume()
+    embed.add_field(name="Volume", value=f"{volume}%", inline=True)
+    if state.loop_mode != "none":
+        embed.add_field(name="Loop", value=state.loop_mode.title(), inline=True)
+
+    tracks = queue_items(player) if player else []
+    if tracks:
+        preview = []
+        for index, track in enumerate(tracks[:5], start=1):
+            duration = format_duration(track.length)
+            suffix = f" `[{duration}]`" if duration else ""
+            preview.append(f"`{index}.` {track_display_title(track)}{suffix}")
+        if len(tracks) > 5:
+            preview.append(f"...and {len(tracks) - 5} more")
+        embed.add_field(name=f"Queue ({len(tracks)})", value="\n".join(preview), inline=False)
+    else:
+        embed.add_field(name="Queue", value="Empty", inline=False)
+
+    return embed
+
+
+class PlayerControls(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    async def refresh(self, interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        await update_display_for_guild(self.guild_id, player)
+
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    async def restart(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player or not player.current:
+            await respond(interaction, "Nothing to restart.")
+            return
+        await player.seek(0)
+        await respond(interaction, "Restarted.")
+
+    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.primary, row=0)
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player or not player.current:
+            await respond(interaction, "Nothing to pause or resume.")
+            return
+        should_pause = not player.paused
+        await player.pause(should_pause)
+        await respond(interaction, "Paused." if should_pause else "Resumed.")
+        await self.refresh(interaction)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player or not player.current:
+            await respond(interaction, "Nothing to skip.")
+            return
+        await player.skip(force=True)
+        await respond(interaction, "Skipped.")
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.")
+            return
+        await clear_player(player)
+        await respond(interaction, "Stopped and cleared the queue.")
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="-10%", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_down(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.")
+            return
+        new_volume = max(0, player.volume - 10)
+        await set_volume(player, new_volume)
+        await respond(interaction, f"Volume: {new_volume}%")
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="+10%", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_up(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.")
+            return
+        new_volume = min(200, player.volume + 10)
+        await set_volume(player, new_volume)
+        await respond(interaction, f"Volume: {new_volume}%")
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Mute", style=discord.ButtonStyle.secondary, row=1)
+    async def mute(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.")
+            return
+        state = get_guild_state(self.guild_id)
+        if player.volume > 0:
+            state.previous_volume = player.volume
+            await set_volume(player, 0)
+            await respond(interaction, "Muted.")
+        else:
+            volume = state.previous_volume or default_volume()
+            await set_volume(player, volume)
+            await respond(interaction, f"Volume: {volume}%")
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, row=2)
+    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player or player.queue.is_empty:
+            await respond(interaction, "Queue is empty.")
+            return
+        player.queue.shuffle()
+        await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Loop", style=discord.ButtonStyle.secondary, row=2)
+    async def loop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.")
+            return
+        state = get_guild_state(self.guild_id)
+        modes = ["none", "track", "queue"]
+        mode = modes[(modes.index(state.loop_mode) + 1) % len(modes)]
+        set_loop_mode(player, mode)
+        await respond(interaction, f"Loop: {mode}")
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Queue", style=discord.ButtonStyle.secondary, row=2)
+    async def queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = player_for_interaction(interaction)
+        await interaction.response.send_message(
+            embed=build_queue_embed(player, page=0),
+            view=QueueView(self.guild_id, player),
+            ephemeral=True,
+        )
+
+
+class QueueView(discord.ui.View):
+    def __init__(self, guild_id: int, player: wavelink.Player | None):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.page = 0
+        self.total_pages = queue_page_count(player)
+
+    async def edit(self, interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        self.total_pages = queue_page_count(player)
+        self.page = min(self.page, self.total_pages - 1)
+        await interaction.response.edit_message(
+            embed=build_queue_embed(player, self.page),
+            view=self,
+        )
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page = max(0, self.page - 1)
+        await self.edit(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page = min(self.total_pages - 1, self.page + 1)
+        await self.edit(interaction)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.success)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.edit(interaction)
+
+
+def queue_page_count(player: wavelink.Player | None) -> int:
+    count = len(queue_items(player)) if player else 0
+    return max(1, (count + 9) // 10)
+
+
+def build_queue_embed(player: wavelink.Player | None, page: int = 0) -> discord.Embed:
+    embed = discord.Embed(title="Music Queue", color=discord.Color.blurple())
+    if player and player.current:
+        embed.add_field(name="Now Playing", value=f"**{track_display_title(player.current)}**", inline=False)
+
+    tracks = queue_items(player) if player else []
+    if not tracks:
+        embed.add_field(name="Up Next", value="Empty", inline=False)
+        return embed
+
+    start = page * 10
+    visible = tracks[start : start + 10]
+    lines = []
+    for offset, track in enumerate(visible, start=1):
+        duration = format_duration(track.length)
+        suffix = f" `[{duration}]`" if duration else ""
+        lines.append(f"`{start + offset}.` **{track_display_title(track)}**{suffix}")
+    embed.add_field(name=f"Up Next ({len(tracks)})", value="\n".join(lines), inline=False)
+    embed.set_footer(text=f"Page {page + 1} of {queue_page_count(player)}")
+    return embed
+
+
+async def create_or_update_display(
+    guild_id: int,
+    channel: discord.abc.Messageable,
+    player: wavelink.Player | None,
+) -> discord.Message | None:
+    state = get_guild_state(guild_id)
+    embed = build_player_embed(player, guild_id)
+    view = PlayerControls(guild_id)
+
     try:
         if state.display_message:
-            # Try to edit existing message
             try:
                 await state.display_message.edit(embed=embed, view=view)
                 return state.display_message
             except (discord.NotFound, discord.HTTPException):
-                # Message was deleted or can't be edited
                 state.display_message = None
-        
-        # Create new message
+
         message = await channel.send(embed=embed, view=view)
         state.display_message = message
         state.display_channel = channel
-        
         return message
-        
-    except Exception as e:
-        logger.error(f"Failed to create/update display: {e}")
+    except Exception:
+        logger.exception("Failed to create or update music display")
         return None
 
-async def update_display_for_guild(guild_id: int):
-    """Update the display for a specific guild"""
+
+async def update_display_for_guild(
+    guild_id: int,
+    player: wavelink.Player | None = None,
+) -> None:
     state = get_guild_state(guild_id)
-    
-    if state.display_channel and (state.current_track or state.queue):
-        await create_or_update_display(guild_id, state.display_channel)
-    elif state.display_message and not state.current_track and not state.queue:
-        # Clean up display when nothing is playing/queued
+    has_music = bool(player and (player.current or not player.queue.is_empty))
+    if state.display_channel and has_music:
+        await create_or_update_display(guild_id, state.display_channel, player)
+    elif state.display_message and not has_music:
         try:
             await state.display_message.delete()
-        except:
+        except discord.HTTPException:
             pass
         state.display_message = None
         state.display_channel = None
 
-# ============= ORIGINAL VIEW CLASSES =============
 
-class VolumeView(discord.ui.View):
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=300)  # 5 minute timeout
-        self.guild_id = guild_id
-    
-    @discord.ui.button(label="🔉 -10%", style=discord.ButtonStyle.secondary)
-    async def volume_down(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        new_volume = max(0, state.volume - 0.1)
-        volume_applied = set_volume(self.guild_id, new_volume)
-        
-        percentage = int(new_volume * 100)
-        volume_emoji = "🔇" if percentage == 0 else "🔉" if percentage < 50 else "🔊"
-        
-        # Update the embed
-        embed = interaction.message.embeds[0]
-        for i, field in enumerate(embed.fields):
-            if field.name == "🔊 Volume":
-                embed.set_field_at(i, name="🔊 Volume", value=f"{volume_emoji} {percentage}%", inline=True)
-                break
-        
-        await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="🔊 +10%", style=discord.ButtonStyle.secondary)
-    async def volume_up(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        new_volume = min(2.0, state.volume + 0.1)
-        volume_applied = set_volume(self.guild_id, new_volume)
-        
-        percentage = int(new_volume * 100)
-        volume_emoji = "🔇" if percentage == 0 else "🔉" if percentage < 50 else "🔊"
-        
-        # Update the embed
-        embed = interaction.message.embeds[0]
-        for i, field in enumerate(embed.fields):
-            if field.name == "🔊 Volume":
-                embed.set_field_at(i, name="🔊 Volume", value=f"{volume_emoji} {percentage}%", inline=True)
-                break
-        
-        await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="🔇 Mute", style=discord.ButtonStyle.danger)
-    async def mute_toggle(self, button: discord.ui.Button, interaction: discord.Interaction):
-        state = get_guild_state(self.guild_id)
-        
-        if state.volume > 0:
-            # Store current volume and mute
-            state.previous_volume = state.volume
-            set_volume(self.guild_id, 0)
-            button.label = "🔊 Unmute"
-            button.style = discord.ButtonStyle.success
-            volume_text = "🔇 0% (Muted)"
-        else:
-            # Restore previous volume
-            restore_vol = getattr(state, 'previous_volume', 1.0)
-            set_volume(self.guild_id, restore_vol)
-            button.label = "🔇 Mute"
-            button.style = discord.ButtonStyle.danger
-            percentage = int(restore_vol * 100)
-            volume_emoji = "🔉" if percentage < 50 else "🔊"
-            volume_text = f"{volume_emoji} {percentage}%"
-        
-        # Update the embed
-        embed = interaction.message.embeds[0]
-        for i, field in enumerate(embed.fields):
-            if field.name == "🔊 Volume":
-                embed.set_field_at(i, name="🔊 Volume", value=volume_text, inline=True)
-                break
-        
-        await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="⏸️ Pause", style=discord.ButtonStyle.primary)
-    async def pause_resume(self, button: discord.ui.Button, interaction: discord.Interaction):
-        vc = interaction.guild.voice_client
-        state = get_guild_state(self.guild_id)
-        
-        if not vc:
-            await interaction.response.send_message("❌ Not connected to voice!", ephemeral=True)
-            return
-        
-        if vc.is_playing():
-            vc.pause()
-            state.is_paused = True
-            button.label = "▶️ Resume"
-            button.style = discord.ButtonStyle.success
-            
-            # Update embed color and status
-            embed = interaction.message.embeds[0]
-            embed.color = discord.Color.yellow()
-            for i, field in enumerate(embed.fields):
-                if field.name == "📊 Status":
-                    embed.set_field_at(i, name="📊 Status", value="⏸️ Paused", inline=True)
-                    break
-            
-        elif vc.is_paused():
-            vc.resume()
-            state.is_paused = False
-            button.label = "⏸️ Pause"
-            button.style = discord.ButtonStyle.primary
-            
-            # Update embed color and status
-            embed = interaction.message.embeds[0]
-            embed.color = discord.Color.green()
-            for i, field in enumerate(embed.fields):
-                if field.name == "📊 Status":
-                    embed.set_field_at(i, name="📊 Status", value="▶️ Playing", inline=True)
-                    break
-        else:
-            await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
-            return
-        
-        await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary)
-    async def skip_track(self, button: discord.ui.Button, interaction: discord.Interaction):
-        vc = interaction.guild.voice_client
-        
-        if vc and vc.is_playing():
-            vc.stop()
-            await interaction.response.send_message("⏭️ Skipped!", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
-    
-    async def on_timeout(self):
-        # Disable all buttons when view times out
-        for item in self.children:
-            item.disabled = True
-        
-        # Try to edit the message to show disabled buttons
-        try:
-            if hasattr(self, 'message') and self.message:
-                await self.message.edit(view=self)
-        except:
-            pass
+def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
+    if not isinstance(interaction.user, discord.Member):
+        return None
+    voice = interaction.user.voice
+    return voice.channel if voice else None
 
-class QueueView(discord.ui.View):
-    def __init__(self, guild_id: int, total_pages: int):
-        super().__init__(timeout=300)
-        self.guild_id = guild_id
-        self.current_page = 0
-        self.total_pages = total_pages
-        
-        # Disable navigation buttons if only one page
-        if total_pages <= 1:
-            self.prev_page.disabled = True
-            self.next_page.disabled = True
-    
-    def get_queue_embed(self, page: int = 0):
-        state = get_guild_state(self.guild_id)
-        embed = discord.Embed(title="🎶 Music Queue", color=discord.Color.blurple())
-        
-        # Current track
-        if state.current_track:
-            status_emoji = "⏸️" if state.is_paused else "🎵"
-            embed.add_field(
-                name="Now Playing", 
-                value=f"{status_emoji} **{state.current_track.title}**",
-                inline=False
-            )
-        
-        # Queue pagination (10 tracks per page)
-        if state.queue:
-            start_idx = page * 10
-            end_idx = min(start_idx + 10, len(state.queue))
-            queue_slice = list(state.queue)[start_idx:end_idx]
-            
-            queue_list = []
-            for i, track in enumerate(queue_slice):
-                duration = ""
-                if track.duration:
-                    minutes, seconds = divmod(track.duration, 60)
-                    duration = f" `[{minutes}:{seconds:02d}]`"
-                queue_list.append(f"`{start_idx + i + 1}.` **{track.title}**{duration}")
-            
-            embed.add_field(
-                name=f"Up Next ({len(state.queue)} track{'s' if len(state.queue) != 1 else ''})",
-                value="\n".join(queue_list) if queue_list else "*Empty*",
-                inline=False
-            )
-            
-            if self.total_pages > 1:
-                embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
-        else:
-            embed.add_field(name="Queue", value="*Empty*", inline=False)
-        
-        # Add loop status
-        if state.loop_mode != 'none':
-            loop_emoji = "🔂" if state.loop_mode == 'track' else "🔁"
-            current_footer = embed.footer.text if embed.footer else ""
-            footer_text = f"{loop_emoji} Loop: {state.loop_mode.title()}"
-            if current_footer:
-                footer_text = f"{current_footer} • {footer_text}"
-            embed.set_footer(text=footer_text)
-        
-        return embed
-    
-    @discord.ui.button(label="⬅️ Previous", style=discord.ButtonStyle.secondary)
-    async def prev_page(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.current_page > 0:
-            self.current_page -= 1
-            
-            # Update button states
-            self.next_page.disabled = False
-            if self.current_page == 0:
-                self.prev_page.disabled = True
-            
-            embed = self.get_queue_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
-    
-    @discord.ui.button(label="➡️ Next", style=discord.ButtonStyle.secondary)
-    async def next_page(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            
-            # Update button states
-            self.prev_page.disabled = False
-            if self.current_page == self.total_pages - 1:
-                self.next_page.disabled = True
-            
-            embed = self.get_queue_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
-    
-    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.success)
-    async def refresh_queue(self, button: discord.ui.Button, interaction: discord.Interaction):
-        # Recalculate pages in case queue changed
-        state = get_guild_state(self.guild_id)
-        self.total_pages = max(1, (len(state.queue) + 9) // 10)
-        
-        # Reset to first page if current page is now out of bounds
-        if self.current_page >= self.total_pages:
-            self.current_page = max(0, self.total_pages - 1)
-        
-        # Update button states
-        self.prev_page.disabled = self.current_page == 0
-        self.next_page.disabled = self.current_page == self.total_pages - 1 or self.total_pages <= 1
-        
-        embed = self.get_queue_embed(self.current_page)
-        await interaction.response.edit_message(embed=embed, view=self)
 
-# ============= COMMAND SETUP FUNCTION =============
+async def play_impl(interaction: discord.Interaction, query: str) -> None:
+    if not interaction.guild:
+        await respond(interaction, "This command can only be used in a server.", ephemeral=True)
+        return
 
-def setup_all_commands(bot):
-    # Play command with persistent display
-    @bot.slash_command(name="play", description="Play audio from YouTube or search query")
-    @bot.slash_command(name="p", description="Play audio from YouTube or search query")
-    @option("query", description="YouTube URL or search terms", required=True)
-    async def play(ctx: discord.ApplicationContext, query: str):
-        logger.info(f"User '{ctx.author}' in guild '{ctx.guild.name}' initiated /play with query: '{query}'")
-        await ctx.defer()
-        
-        if not ctx.author.voice:
-            await ctx.followup.send("❌ You must be in a voice channel!", ephemeral=True)
-            return
-        
-        channel = ctx.author.voice.channel
-        try:
-            vc = ctx.voice_client or await channel.connect()
-            if vc.channel != channel:
-                logger.info(f"Moving to voice channel '{channel.name}' in guild '{ctx.guild.name}'.")
-                await vc.move_to(channel)
-        except Exception as e:
-            await ctx.followup.send(f"❌ Failed to join voice: {e}")
-            return
-        
-        try:
-            track = await asyncio.wait_for(
-                fetch_track_info(query, str(ctx.author)), 
-                timeout=15
-            )
-        except asyncio.TimeoutError:
-            await ctx.followup.send("⏱️ Timed out fetching track info.")
-            return
-        except Exception as e:
-            await ctx.followup.send(f"❌ Error fetching track: {e}")
-            return
-        
-        state = get_guild_state(ctx.guild.id)
+    channel = user_voice_channel(interaction)
+    if not channel:
+        await respond(interaction, "Join a voice channel first.", ephemeral=True)
+        return
 
-        state.text_channel = ctx.channel
-        
-        # Check if we need to create display (first track added)
-        needs_display = not state.current_track and not state.queue
-        
-        state.queue.append(track)
+    await interaction.response.defer(thinking=True)
+    try:
+        player = await ensure_player(interaction.guild, channel)
+    except Exception as exc:
+        logger.exception("Failed to connect Lavalink player to voice")
+        await respond(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
+        return
 
-        logger.info(f"Added '{track.title}' to the queue for guild '{ctx.guild.name}'. Queue size: {len(state.queue)}.")
-        
-       # Show queue position with auto-delete
-        position = len(state.queue)
-        if state.current_track:
-           await ctx.followup.send(f"✅ Added to queue (#{position}): **{track.title}**", delete_after=3)
-        else:
-           await ctx.followup.send(f"✅ Added: **{track.title}**", delete_after=3)
-    
-        
-        # Create display if this is the first track
-        if needs_display:
-            await create_or_update_display(ctx.guild.id, ctx.channel)
-        else:
-            # Update existing display
-            await update_display_for_guild(ctx.guild.id)
-        
-        if not state.is_playing:
-            await play_next(ctx.guild.id, vc, bot)
-    
-    # Enhanced control commands
-    @bot.slash_command(name="pause", description="Pause the current track")
-    async def pause(ctx: discord.ApplicationContext):
-        vc = ctx.voice_client
-        state = get_guild_state(ctx.guild.id)
-        
-        if vc and vc.is_playing():
-            vc.pause()
-            state.is_paused = True
-            await ctx.respond("⏸️ Paused!")
-            await update_display_for_guild(ctx.guild.id)
-        else:
-            await ctx.respond("❌ Nothing is playing.", ephemeral=True)
-    
-    @bot.slash_command(name="resume", description="Resume the paused track")
-    async def resume(ctx: discord.ApplicationContext):
-        vc = ctx.voice_client
-        state = get_guild_state(ctx.guild.id)
-        
-        if vc and vc.is_paused():
-            vc.resume()
-            state.is_paused = False
-            await ctx.respond("▶️ Resumed!")
-            await update_display_for_guild(ctx.guild.id)
-        else:
-            await ctx.respond("❌ Nothing is paused.", ephemeral=True)
-    
-    @bot.slash_command(name="loop", description="Set loop mode")
-    @option("mode", description="Loop mode", choices=["none", "track", "queue"])
-    async def loop(ctx: discord.ApplicationContext, mode: str):
-        state = get_guild_state(ctx.guild.id)
-        state.loop_mode = mode
-        
-        mode_emoji = {"none": "➡️", "track": "🔂", "queue": "🔁"}
-        await ctx.respond(f"{mode_emoji[mode]} Loop mode set to: **{mode}**")
-        await update_display_for_guild(ctx.guild.id)
-    
-    # Real-time volume command
-    @bot.slash_command(name="volume", description="Set playback volume (0-200%)")
-    @option("level", description="Volume level (0-200)", min_value=0, max_value=200)
-    async def volume(ctx: discord.ApplicationContext, level: int):
-        state = get_guild_state(ctx.guild.id)
-        volume_multiplier = level / 100.0
-        
-        # Set volume (applies immediately if playing)
-        volume_applied = set_volume(ctx.guild.id, volume_multiplier)
-        
-        volume_emoji = "🔇" if level == 0 else "🔉" if level < 50 else "🔊"
-        
-        if volume_applied and state.is_playing:
-            await ctx.respond(f"{volume_emoji} Volume changed to **{level}%** (applied immediately)")
-        else:
-            await ctx.respond(f"{volume_emoji} Volume set to **{level}%** (will apply to next track)")
-        
-        await update_display_for_guild(ctx.guild.id)
-    
-    # Enhanced now playing with interactive controls
-    @bot.slash_command(name="nowplaying", description="Show current track with interactive controls")
-    @bot.slash_command(name="np", description="Show current track with interactive controls")
-    async def nowplaying(ctx: discord.ApplicationContext):
-        state = get_guild_state(ctx.guild.id)
-        
-        if not state.current_track:
-            await ctx.respond("❌ Nothing is playing.", ephemeral=True)
+    state = get_guild_state(interaction.guild.id)
+    state.text_channel = interaction.channel
+
+    try:
+        tracks, summary = await load_tracks(query, str(interaction.user))
+    except Exception as exc:
+        logger.exception("Failed to load query %r", query)
+        await respond(interaction, f"Could not load that request: {exc}", ephemeral=True)
+        return
+
+    if not tracks:
+        await respond(interaction, "No playable tracks were found.", ephemeral=True)
+        return
+
+    was_idle = not player.current and player.queue.is_empty
+    try:
+        await add_tracks(player, tracks)
+    except Exception as exc:
+        logger.exception("Failed to start playback for query %r", query)
+        await respond(interaction, f"Could not start playback: {exc}", ephemeral=True)
+        return
+
+    if was_idle and interaction.channel:
+        await create_or_update_display(interaction.guild.id, interaction.channel, player)
+    else:
+        await update_display_for_guild(interaction.guild.id, player)
+
+    if summary.added == 1:
+        await respond(interaction, f"Added: **{summary.title}**")
+    else:
+        await respond(interaction, f"Added {summary.added} tracks from **{summary.title}**.")
+
+
+async def skip_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    if not player or not player.current:
+        await respond(interaction, "Nothing is playing.", ephemeral=True)
+        return
+    await player.skip(force=True)
+    await respond(interaction, "Skipped.")
+
+
+async def clear_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    if not player:
+        await respond(interaction, "Not connected.", ephemeral=True)
+        return
+    await clear_player(player)
+    await respond(interaction, "Cleared the queue.")
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def disconnect_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    if not player:
+        await respond(interaction, "Not connected.", ephemeral=True)
+        return
+    guild_id = player.guild.id
+    await disconnect_player(player)
+    await respond(interaction, "Disconnected.")
+    await update_display_for_guild(guild_id, None)
+
+
+async def nowplaying_impl(interaction: discord.Interaction) -> None:
+    player = player_for_interaction(interaction)
+    await interaction.response.send_message(
+        embed=build_player_embed(player, interaction.guild_id or 0),
+        view=PlayerControls(interaction.guild_id or 0),
+        ephemeral=True,
+    )
+
+
+def setup_all_commands(bot: commands.Bot) -> None:
+    @bot.tree.command(name="play", description="Play a YouTube URL/search or Spotify playlist link")
+    @app_commands.describe(query="YouTube URL, search terms, or Spotify playlist URL")
+    async def play(interaction: discord.Interaction, query: str) -> None:
+        await play_impl(interaction, query)
+
+    @bot.tree.command(name="p", description="Short alias for /play")
+    @app_commands.describe(query="YouTube URL, search terms, or Spotify playlist URL")
+    async def play_alias(interaction: discord.Interaction, query: str) -> None:
+        await play_impl(interaction, query)
+
+    @bot.tree.command(name="skip", description="Skip the current track")
+    async def skip(interaction: discord.Interaction) -> None:
+        await skip_impl(interaction)
+
+    @bot.tree.command(name="s", description="Short alias for /skip")
+    async def skip_alias(interaction: discord.Interaction) -> None:
+        await skip_impl(interaction)
+
+    @bot.tree.command(name="pause", description="Pause the current track")
+    async def pause(interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        if not player or not player.current:
+            await respond(interaction, "Nothing is playing.", ephemeral=True)
             return
-        
-        track = state.current_track
-        embed = discord.Embed(
-            title="🎵 Now Playing",
-            description=f"**{track.title}**",
-            color=discord.Color.green() if not state.is_paused else discord.Color.yellow()
+        await player.pause(True)
+        await respond(interaction, "Paused.")
+        await update_display_for_guild(player.guild.id, player)
+
+    @bot.tree.command(name="resume", description="Resume the paused track")
+    async def resume(interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        if not player or not player.paused:
+            await respond(interaction, "Nothing is paused.", ephemeral=True)
+            return
+        await player.pause(False)
+        await respond(interaction, "Resumed.")
+        await update_display_for_guild(player.guild.id, player)
+
+    @bot.tree.command(name="queue", description="Show the music queue")
+    async def queue(interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        await interaction.response.send_message(
+            embed=build_queue_embed(player),
+            view=QueueView(interaction.guild_id or 0, player),
+            ephemeral=True,
         )
-        
-        if track.duration:
-            minutes, seconds = divmod(track.duration, 60)
-            duration_str = f"{minutes}:{seconds:02d}"
-            embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
-        
-        if track.requester:
-            embed.add_field(name="👤 Requested by", value=track.requester, inline=True)
-        
-        status = "⏸️ Paused" if state.is_paused else "▶️ Playing"
-        embed.add_field(name="📊 Status", value=status, inline=True)
-        
-        if state.loop_mode != 'none':
-            loop_emoji = "🔂" if state.loop_mode == 'track' else "🔁"
-            embed.add_field(name="🔄 Loop", value=f"{loop_emoji} {state.loop_mode.title()}", inline=True)
-        
-        volume_emoji = "🔇" if state.volume == 0 else "🔉" if state.volume < 0.5 else "🔊"
-        embed.add_field(name="🔊 Volume", value=f"{volume_emoji} {int(state.volume * 100)}%", inline=True)
-        
-        queue_size = len(state.queue)
-        embed.add_field(name="📝 Queue", value=f"{queue_size} track{'s' if queue_size != 1 else ''}", inline=True)
-        
-        # Add interactive controls
-        view = VolumeView(ctx.guild.id)
-        await ctx.respond(embed=embed, view=view)
-    
-    # Enhanced queue display with pagination
-    @bot.slash_command(name="queue", description="Show the music queue with interactive controls")
-    @bot.slash_command(name="q", description="Show the music queue with interactive controls")  
-    async def queue_cmd(ctx: discord.ApplicationContext):
-        state = get_guild_state(ctx.guild.id)
-        
-        # Calculate total pages (10 tracks per page)
-        total_tracks = len(state.queue)
-        total_pages = max(1, (total_tracks + 9) // 10)
-        
-        view = QueueView(ctx.guild.id, total_pages)
-        embed = view.get_queue_embed(0)
-        
-        await ctx.respond(embed=embed, view=view)
-    
-    # Utility commands
-    @bot.slash_command(name="skip", description="Skip the current track")
-    @bot.slash_command(name="s", description="Skip the current track")
-    async def skip(ctx: discord.ApplicationContext):
-        logger.info(f"User '{ctx.author}' in guild '{ctx.guild.name}' initiated /skip.")
-        vc = ctx.voice_client
-        if vc and vc.is_playing():
-            vc.stop()
-            await ctx.respond("⏭️ Skipped!", delete_after=3)
-        else:
-            await ctx.respond("❌ Nothing is playing.", ephemeral=True, delete_after=3)
-    
-    @bot.slash_command(name="clear", description="Clear the queue")
-    @bot.slash_command(name="c", description="Clear the queue")
-    async def clear(ctx: discord.ApplicationContext):
-        state = get_guild_state(ctx.guild.id)
-        if state.queue:
-            count = len(state.queue)
-            state.queue.clear()
-            await ctx.respond(f"🗑️ Cleared {count} track{'s' if count != 1 else ''} from queue!", delete_after=3)
-            await update_display_for_guild(ctx.guild.id)
-        else:
-            await ctx.respond("❌ Queue is already empty.", ephemeral=True, delete_after=3)
-    
-    @bot.slash_command(name="disconnect", description="Disconnect from voice channel")
-    @bot.slash_command(name="dc", description="Disconnect from voice channel")
-    async def disconnect(ctx: discord.ApplicationContext):
-        logger.info(f"User '{ctx.author}' in guild '{ctx.guild.name}' initiated /disconnect.")
-        vc = ctx.voice_client
-        if vc:
-            await vc.disconnect()
-            state = get_guild_state(ctx.guild.id)
-            
-            # Clean up display
-            if state.display_message:
-                try:
-                    await state.display_message.delete()
-                except:
-                    pass
-            
-            # Reset state
-            state.current_track = None
-            state.is_playing = False
-            state.volume_transformer = None
-            state.display_message = None
-            state.display_channel = None
-            
-            await ctx.respond("👋 Disconnected from voice channel!")
-        else:
-            await ctx.respond("❌ Not connected to a voice channel.", ephemeral=True)
-    
-    # Additional utility commands
-    @bot.slash_command(name="shuffle", description="Shuffle the current queue")
-    async def shuffle(ctx: discord.ApplicationContext):
-        state = get_guild_state(ctx.guild.id)
-        if not state.queue:
-            await ctx.respond("❌ Queue is empty.", ephemeral=True)
+
+    @bot.tree.command(name="q", description="Short alias for /queue")
+    async def queue_alias(interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        await interaction.response.send_message(
+            embed=build_queue_embed(player),
+            view=QueueView(interaction.guild_id or 0, player),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="clear", description="Clear the queue and stop playback")
+    async def clear(interaction: discord.Interaction) -> None:
+        await clear_impl(interaction)
+
+    @bot.tree.command(name="c", description="Short alias for /clear")
+    async def clear_alias(interaction: discord.Interaction) -> None:
+        await clear_impl(interaction)
+
+    @bot.tree.command(name="disconnect", description="Disconnect from voice")
+    async def disconnect(interaction: discord.Interaction) -> None:
+        await disconnect_impl(interaction)
+
+    @bot.tree.command(name="dc", description="Short alias for /disconnect")
+    async def disconnect_alias(interaction: discord.Interaction) -> None:
+        await disconnect_impl(interaction)
+
+    @bot.tree.command(name="volume", description="Set playback volume from 0 to 200 percent")
+    @app_commands.describe(level="Volume from 0 to 200")
+    async def volume(interaction: discord.Interaction, level: app_commands.Range[int, 0, 200]) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.", ephemeral=True)
             return
-        
-        # Convert to list, shuffle, then back to deque
-        queue_list = list(state.queue)
-        random.shuffle(queue_list)
-        state.queue = deque(queue_list)
-        
-        await ctx.respond(f"🔀 Shuffled {len(queue_list)} track{'s' if len(queue_list) != 1 else ''}!")
-        await update_display_for_guild(ctx.guild.id)
-    
-    @bot.slash_command(name="remove", description="Remove a track from the queue")
-    @option("position", description="Position in queue to remove (1-based)", min_value=1)
-    async def remove(ctx: discord.ApplicationContext, position: int):
-        state = get_guild_state(ctx.guild.id)
-        
-        if not state.queue:
-            await ctx.respond("❌ Queue is empty.", ephemeral=True)
+        await set_volume(player, int(level))
+        await respond(interaction, f"Volume: {int(level)}%")
+        await update_display_for_guild(player.guild.id, player)
+
+    @bot.tree.command(name="shuffle", description="Shuffle the queue")
+    async def shuffle(interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        if not player or player.queue.is_empty:
+            await respond(interaction, "Queue is empty.", ephemeral=True)
             return
-        
-        if position > len(state.queue):
-            await ctx.respond(f"❌ Position {position} is out of range. Queue has {len(state.queue)} track{'s' if len(state.queue) != 1 else ''}.", ephemeral=True)
+        player.queue.shuffle()
+        await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
+        await update_display_for_guild(player.guild.id, player)
+
+    @bot.tree.command(name="remove", description="Remove a queued track by position")
+    @app_commands.describe(position="1-based queue position")
+    async def remove(interaction: discord.Interaction, position: app_commands.Range[int, 1, 500]) -> None:
+        player = player_for_interaction(interaction)
+        tracks = queue_items(player) if player else []
+        if not tracks:
+            await respond(interaction, "Queue is empty.", ephemeral=True)
             return
-        
-        # Convert to list for easier manipulation
-        queue_list = list(state.queue)
-        removed_track = queue_list.pop(position - 1)
-        state.queue = deque(queue_list)
-        
-        await ctx.respond(f"🗑️ Removed **{removed_track.title}** from position {position}")
-        await update_display_for_guild(ctx.guild.id)
-    
-    @bot.slash_command(name="move", description="Move a track to a different position in the queue")
-    @option("from_pos", description="Current position (1-based)", min_value=1)
-    @option("to_pos", description="New position (1-based)", min_value=1)
-    async def move(ctx: discord.ApplicationContext, from_pos: int, to_pos: int):
-        state = get_guild_state(ctx.guild.id)
-        
-        if not state.queue:
-            await ctx.respond("❌ Queue is empty.", ephemeral=True)
+        if position > len(tracks):
+            await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
             return
-        
-        queue_len = len(state.queue)
-        if from_pos > queue_len or to_pos > queue_len:
-            await ctx.respond(f"❌ Position out of range. Queue has {queue_len} track{'s' if queue_len != 1 else ''}.", ephemeral=True)
+        removed = tracks[position - 1]
+        del player.queue[position - 1]
+        await respond(interaction, f"Removed **{track_display_title(removed)}**.")
+        await update_display_for_guild(player.guild.id, player)
+
+    @bot.tree.command(name="move", description="Move a queued track")
+    async def move(
+        interaction: discord.Interaction,
+        from_pos: app_commands.Range[int, 1, 500],
+        to_pos: app_commands.Range[int, 1, 500],
+    ) -> None:
+        player = player_for_interaction(interaction)
+        tracks = queue_items(player) if player else []
+        if not tracks:
+            await respond(interaction, "Queue is empty.", ephemeral=True)
             return
-        
-        # Convert to list for easier manipulation
-        queue_list = list(state.queue)
-        track = queue_list.pop(from_pos - 1)
-        queue_list.insert(to_pos - 1, track)
-        state.queue = deque(queue_list)
-        
-        await ctx.respond(f"📦 Moved **{track.title}** from position {from_pos} to {to_pos}")
-        await update_display_for_guild(ctx.guild.id)
+        if from_pos > len(tracks) or to_pos > len(tracks):
+            await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
+            return
+        track = tracks[from_pos - 1]
+        del player.queue[from_pos - 1]
+        player.queue.put_at(to_pos - 1, track)
+        await respond(interaction, f"Moved **{track_display_title(track)}** to position {to_pos}.")
+        await update_display_for_guild(player.guild.id, player)
+
+    @bot.tree.command(name="loop", description="Set loop mode")
+    @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="none", value="none"),
+            app_commands.Choice(name="track", value="track"),
+            app_commands.Choice(name="queue", value="queue"),
+        ]
+    )
+    async def loop(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.", ephemeral=True)
+            return
+        set_loop_mode(player, mode.value)
+        await respond(interaction, f"Loop: {mode.value}")
+        await update_display_for_guild(player.guild.id, player)
+
+    @bot.tree.command(name="nowplaying", description="Show the current player")
+    async def nowplaying(interaction: discord.Interaction) -> None:
+        await nowplaying_impl(interaction)
+
+    @bot.tree.command(name="np", description="Short alias for /nowplaying")
+    async def nowplaying_alias(interaction: discord.Interaction) -> None:
+        await nowplaying_impl(interaction)
+
+
+async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
+    player = payload.player
+    if not player:
+        return
+    if not player.queue.is_empty:
+        await play_next(player)
+    await update_display_for_guild(player.guild.id, player)
+
+
+async def handle_track_start(payload: wavelink.TrackStartEventPayload) -> None:
+    if payload.player:
+        await update_display_for_guild(payload.player.guild.id, payload.player)
+
+
+async def handle_inactive_player(player: wavelink.Player) -> None:
+    state = get_guild_state(player.guild.id)
+    if state.display_channel:
+        await send_transient(state.display_channel, "Disconnected after being idle.")
+    await update_display_for_guild(player.guild.id, player)

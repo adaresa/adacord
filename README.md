@@ -1,95 +1,74 @@
-# Adacord Discord Bot
+# Adacord
 
-A simple Discord music bot that plays YouTube audio in voice channels.
+A personal Discord music bot backed by Lavalink and Wavelink.
+
+The bot handles Discord commands and queue controls. Lavalink handles track loading, streaming, reconnects, and audio delivery.
 
 ## Features
-- Play YouTube audio in voice channels
-- Queue system for multiple songs
-- Skip currently playing songs
-- View and clear the queue
-- Automatic cleanup and disconnection
+
+- YouTube URL and search playback
+- Balanced YouTube Music search ranking to prefer song-like results over long or generic videos
+- Spotify playlist links via public playlist metadata and YouTube Music resolution
+- Queue, skip, pause, resume, clear, shuffle, remove, move, loop, volume, and disconnect commands
+- Persistent Discord control panel
+- Docker Compose setup with separate bot and Lavalink services
 
 ## Commands
 
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `/play <url>` | `/p` | Add a YouTube video to the queue |
-| `/skip` | `/s` | Skip the currently playing song |
-| `/queue` | `/q` | View the current queue |
-| `/clear` | `/c` | Clear the entire queue |
+| Command | Description |
+| --- | --- |
+| `/play <query>` or `/p <query>` | Play a YouTube URL/search or Spotify playlist link |
+| `/skip` or `/s` | Skip the current track |
+| `/pause` | Pause playback |
+| `/resume` | Resume playback |
+| `/queue` or `/q` | Show the queue |
+| `/clear` or `/c` | Clear queue and stop playback |
+| `/disconnect` or `/dc` | Disconnect from voice |
+| `/volume <0-200>` | Set player volume |
+| `/shuffle` | Shuffle the queue |
+| `/remove <position>` | Remove a queued track |
+| `/move <from_pos> <to_pos>` | Move a queued track |
+| `/loop <none|track|queue>` | Set loop mode |
+| `/nowplaying` or `/np` | Show the player panel |
 
 ## Setup
 
-### Prerequisites
-- Python 3.11+
-- FFmpeg installed on your system
-- Discord Bot Token
+1. Copy `.env.example` to `.env`.
+2. Set `DISCORD_TOKEN`.
+3. Optionally set `DISCORD_GUILD_ID` for instant slash-command syncing to one server.
+4. Optionally set `MESSAGE_DELETE_AFTER` to control transient bot message cleanup in seconds. Use `0` to keep confirmations.
+5. Optionally set `DEFAULT_VOLUME` from `0` to `200`. The default is `50`.
+6. Start everything:
 
-### Installation
+```bash
+docker compose up -d --build
+```
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/adacord.git
-   cd adacord
-   ```
+The bot connects to Lavalink at `http://lavalink:2333` inside Docker.
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Local Development
 
-3. Create a Discord application and bot:
-   * Go to https://discord.com/developers/applications
-   * Create a new application
-   * Go to the Bot section
-   * Create a bot and copy the token
+Install dependencies:
 
-4. Create a `.env` file:
-   ```bash
-   DISCORD_TOKEN=your-bot-token-here
-   LOG_LEVEL=ERROR # Optional: DEBUG, INFO, WARNING, ERROR
-   ```
+```bash
+python -m pip install -r requirements.txt
+```
 
-5. Invite the bot to your server:
-   * In the Discord Developer Portal, go to OAuth2 > URL Generator
-   * Select bot and applications.commands scopes
-   * Select permissions: Send Messages, Connect, Speak, Use Slash Commands
-   * Use the generated URL to invite the bot
+Run the lightweight local checks:
 
-6. Run the bot:
-   ```bash
-   python bot.py
-   ```
+```bash
+python -m py_compile bot.py audio.py commands.py source_utils.py test_extractor.py
+python test_extractor.py
+```
 
-## Docker Usage
+To run the bot outside Docker, start a Lavalink node and set:
 
-### Build and Run
+```bash
+LAVALINK_URI=http://localhost:2333
+```
 
-   ```bash
-   # Build the image
-   docker build -t adacord-bot .
-   
-   # Run with .env file
-   docker run --env-file .env adacord-bot
+## Notes
 
-   # Or run with environment variables
-   docker run -e DISCORD_TOKEN=your-token-here adacord-bot
-   ```
-
-### Docker Compose (optional)
-
-   Create `docker-compose.yml`:
-   ```yaml
-   version: '3.8'
-
-   services:
-      bot:
-         build: .
-         env_file: .env
-         restart: unless-stopped
-   ```
-
-   Then run:
-   ```bash
-   docker-compose up -d
-   ```
+- The built-in Lavalink YouTube source is disabled. The maintained YouTube plugin is configured in `lavalink/application.yml`.
+- Spotify links are treated as metadata/playlist inputs. The bot does not download or stream Spotify audio directly.
+- For a private bot, global slash commands can take time to update. Set `DISCORD_GUILD_ID` while iterating.

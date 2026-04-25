@@ -1,21 +1,147 @@
-import sys
 import asyncio
+import os
 
-from audio import extractor
+import wavelink
+
+from audio import choose_best_song_candidate, default_volume, display_track_title, search_youtube
+from commands import message_delete_after
+from source_utils import format_duration, is_url, spotify_playlist_id
 
 
-async def main(query: str) -> None:
+class FakeTrack:
+    def __init__(
+        self,
+        title: str,
+        *,
+        author: str = "",
+        length: int = 210_000,
+        source: str = "youtube music",
+    ):
+        self.title = title
+        self.author = author
+        self.length = length
+        self.source = source
+
+
+def test_url_detection() -> None:
+    assert is_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    assert is_url("http://example.com/audio")
+    assert not is_url("daft punk one more time")
+
+
+def test_spotify_playlist_id() -> None:
+    assert (
+        spotify_playlist_id("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")
+        == "37i9dQZF1DXcBWIGoYBM5M"
+    )
+    assert (
+        spotify_playlist_id("https://open.spotify.com/intl-ee/playlist/abc123?si=token")
+        == "abc123"
+    )
+    assert spotify_playlist_id("https://open.spotify.com/track/abc123") is None
+
+
+def test_duration_formatting() -> None:
+    assert format_duration(None) == ""
+    assert format_duration(0) == ""
+    assert format_duration(65_000) == "1:05"
+    assert format_duration(3_665_000) == "1:01:05"
+
+
+def test_song_candidate_prefers_song_like_result() -> None:
+    generic = FakeTrack("Daft Punk One More Time random upload", author="Some Channel")
+    official = FakeTrack("One More Time", author="Daft Punk - Topic")
+
+    assert choose_best_song_candidate([generic, official], "daft punk one more time") is official
+
+
+def test_song_candidate_avoids_extended_result() -> None:
+    extended = FakeTrack("One More Time extended loop 1 hour", length=3_600_000)
+    normal = FakeTrack("One More Time lyrics", author="Daft Punk")
+
+    assert choose_best_song_candidate([extended, normal], "daft punk one more time") is normal
+
+
+def test_song_candidate_allows_requested_variant_terms() -> None:
+    remix = FakeTrack("One More Time remix", author="Daft Punk")
+    original = FakeTrack("One More Time lyrics", author="Daft Punk")
+
+    assert choose_best_song_candidate([remix, original], "daft punk one more time remix") is remix
+
+
+def test_display_title_keeps_requested_variant_visible() -> None:
+    track = FakeTrack("Rockefeller Street")
+
+    assert display_track_title(track, "rockefeller street nightcore") == "Rockefeller Street (nightcore)"
+    assert display_track_title(track, "rockefeller street") == "Rockefeller Street"
+
+
+async def test_url_search_keeps_first_result() -> None:
+    first = FakeTrack("Specific video URL")
+    better = FakeTrack("Specific video URL lyrics")
+    original_search = wavelink.Playable.search
+
+    async def fake_search(query: str, *, source=None):
+        assert query == "https://youtu.be/example"
+        assert source is None
+        return [first, better]
+
     try:
-        url, headers = await extractor.get_stream_url(query)
-        print("OK")
-        print(url[:120])
-        print("headers:", sorted(list(headers.keys())))
-    except Exception as e:
-        print("ERROR:", str(e))
+        wavelink.Playable.search = staticmethod(fake_search)
+        assert await search_youtube("https://youtu.be/example", "tester") == [first]
+    finally:
+        wavelink.Playable.search = original_search
+
+
+def test_message_delete_after_default_and_invalid_values() -> None:
+    previous = os.environ.get("MESSAGE_DELETE_AFTER")
+    try:
+        os.environ.pop("MESSAGE_DELETE_AFTER", None)
+        assert message_delete_after() == 5
+        os.environ["MESSAGE_DELETE_AFTER"] = "not-a-number"
+        assert message_delete_after() == 5
+        os.environ["MESSAGE_DELETE_AFTER"] = "0"
+        assert message_delete_after() == 0
+        os.environ["MESSAGE_DELETE_AFTER"] = "-10"
+        assert message_delete_after() == 0
+        os.environ["MESSAGE_DELETE_AFTER"] = "2.5"
+        assert message_delete_after() == 2.5
+    finally:
+        if previous is None:
+            os.environ.pop("MESSAGE_DELETE_AFTER", None)
+        else:
+            os.environ["MESSAGE_DELETE_AFTER"] = previous
+
+
+def test_default_volume_values() -> None:
+    previous = os.environ.get("DEFAULT_VOLUME")
+    try:
+        os.environ.pop("DEFAULT_VOLUME", None)
+        assert default_volume() == 50
+        os.environ["DEFAULT_VOLUME"] = "not-a-number"
+        assert default_volume() == 50
+        os.environ["DEFAULT_VOLUME"] = "300"
+        assert default_volume() == 200
+        os.environ["DEFAULT_VOLUME"] = "-10"
+        assert default_volume() == 0
+        os.environ["DEFAULT_VOLUME"] = "75"
+        assert default_volume() == 75
+    finally:
+        if previous is None:
+            os.environ.pop("DEFAULT_VOLUME", None)
+        else:
+            os.environ["DEFAULT_VOLUME"] = previous
 
 
 if __name__ == "__main__":
-    q = " ".join(sys.argv[1:]) or "petit biscuit sunset lover slowed"
-    asyncio.run(main(q))
-
-
+    test_url_detection()
+    test_spotify_playlist_id()
+    test_duration_formatting()
+    test_song_candidate_prefers_song_like_result()
+    test_song_candidate_avoids_extended_result()
+    test_song_candidate_allows_requested_variant_terms()
+    test_display_title_keeps_requested_variant_visible()
+    asyncio.run(test_url_search_keeps_first_result())
+    test_message_delete_after_default_and_invalid_values()
+    test_default_volume_values()
+    print("OK")
