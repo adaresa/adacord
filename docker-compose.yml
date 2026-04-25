@@ -6,6 +6,9 @@ services:
     environment:
       _JAVA_OPTIONS: "-Xmx512M"
       LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-youshallnotpass}
+      YOUTUBE_OAUTH_ENABLED: ${YOUTUBE_OAUTH_ENABLED:-false}
+      YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
+      YOUTUBE_OAUTH_SKIP_INITIALIZATION: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:-true}
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
     expose:
