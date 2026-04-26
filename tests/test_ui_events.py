@@ -3,9 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import discord
+import pytest
 
 from adacord import events, ui
-from adacord.state import get_guild_state
+from adacord.state import get_guild_state, guild_states
 from conftest import FakeInteraction, FakeMessage, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack
 
 
@@ -45,8 +46,17 @@ def test_build_player_panel_model_for_idle_state() -> None:
     assert model.progress == "No active track"
     assert model.volume == 50
     assert model.queue_count == 0
-    assert model.queue_preview == []
+    assert model.queue_preview == ()
     assert model.disabled["pause_resume"] is True
+    with pytest.raises(TypeError):
+        model.disabled["pause_resume"] = False
+
+
+def test_player_panel_model_without_guild_does_not_create_state() -> None:
+    model = ui.build_player_panel_model(None, None)
+
+    assert model.loop_mode == "none"
+    assert 0 not in guild_states
 
 
 def test_player_panel_view_is_persistent_v2_with_stable_controls() -> None:
@@ -158,6 +168,23 @@ async def test_create_or_update_display_replaces_legacy_embed_message() -> None:
     assert message.flags.components_v2 is True
     assert state.display_message is message
     assert state.display_message_id == message.id
+
+
+async def test_create_or_update_display_restores_channel_on_existing_v2_edit() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    state.display_message = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    state.display_channel = None
+    state.display_channel_id = None
+
+    message = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert message is state.display_message
+    assert state.display_channel is channel
+    assert state.display_channel_id == channel.id
 
 
 def test_display_refresh_starts_and_stops(monkeypatch) -> None:

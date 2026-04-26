@@ -2,6 +2,8 @@ import logging
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
+from typing import Mapping
 
 import discord
 import wavelink
@@ -86,10 +88,10 @@ class PlayerPanelModel:
     volume: int
     loop_mode: str
     queue_count: int
-    queue_preview: list[str]
+    queue_preview: tuple[str, ...]
     pause_label: str
     mute_label: str
-    disabled: dict[str, bool]
+    disabled: Mapping[str, bool]
 
     @property
     def accent_color(self) -> int:
@@ -117,7 +119,7 @@ def build_progress_text(player: wavelink.Player | None) -> str:
     return "Live or unknown duration"
 
 
-def build_queue_preview(player: wavelink.Player | None) -> list[str]:
+def build_queue_preview(player: wavelink.Player | None) -> tuple[str, ...]:
     tracks = queue_items(player) if player else []
     preview = []
     for index, track in enumerate(tracks[:5], start=1):
@@ -126,11 +128,11 @@ def build_queue_preview(player: wavelink.Player | None) -> list[str]:
         preview.append(f"`{index}.` {track_display_title(track)}{suffix}")
     if len(tracks) > 5:
         preview.append(f"...and {len(tracks) - 5} more")
-    return preview
+    return tuple(preview)
 
 
-def build_player_panel_model(player: wavelink.Player | None, guild_id: int) -> PlayerPanelModel:
-    state = get_guild_state(guild_id)
+def build_player_panel_model(player: wavelink.Player | None, guild_id: int | None) -> PlayerPanelModel:
+    state = get_guild_state(guild_id) if guild_id is not None else None
     current = player.current if player else None
     tracks = queue_items(player) if player else []
     has_music = bool(current or tracks)
@@ -139,7 +141,7 @@ def build_player_panel_model(player: wavelink.Player | None, guild_id: int) -> P
         panel_state = "paused" if bool(player and player.paused) else "playing"
 
     volume = player.volume if player and player.volume is not None else default_volume()
-    loop_mode = state.loop_mode
+    loop_mode = state.loop_mode if state else "none"
     requester = track_requester(current) if current else None
     title = track_display_title(current) if current else "Nothing playing"
 
@@ -155,7 +157,7 @@ def build_player_panel_model(player: wavelink.Player | None, guild_id: int) -> P
         queue_preview=build_queue_preview(player),
         pause_label="Resume" if bool(player and player.paused) else "Pause",
         mute_label="Unmute" if volume == 0 else "Mute",
-        disabled={
+        disabled=MappingProxyType({
             "restart": not bool(current),
             "pause_resume": not bool(current),
             "skip": not bool(current),
@@ -166,7 +168,7 @@ def build_player_panel_model(player: wavelink.Player | None, guild_id: int) -> P
             "shuffle": not bool(tracks),
             "loop": not has_music,
             "queue": not bool(tracks),
-        },
+        }),
     )
 
 
@@ -217,7 +219,7 @@ class PlayerPanelView(discord.ui.LayoutView):
     def __init__(self, guild_id: int | None = None, model: PlayerPanelModel | None = None):
         super().__init__(timeout=None)
         self.guild_id = guild_id
-        self.model = model or build_player_panel_model(None, guild_id or 0)
+        self.model = model or build_player_panel_model(None, guild_id)
         self.build_layout()
 
     def guild_id_for(self, interaction: discord.Interaction) -> int:
@@ -565,7 +567,8 @@ async def create_or_update_display(
             if display_message_uses_v2(state.display_message):
                 try:
                     await state.display_message.edit(view=view)
-                    state.display_channel_id = getattr(state.display_channel, "id", None)
+                    state.display_channel = channel
+                    state.display_channel_id = getattr(channel, "id", None)
                     state.display_message_id = getattr(state.display_message, "id", None)
                     if manage_refresh:
                         ensure_display_refresh(guild_id, player)
