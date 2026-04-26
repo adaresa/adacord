@@ -10,7 +10,7 @@ Most Discord music bots are either hosted services with feature limits behind pa
 
 - One persistent player panel that updates in place
 - Clickable controls for playback, queue, loop, shuffle, mute, and volume
-- Short-lived command responses so the music channel stays clean
+- Silent player controls so the music channel stays clean
 - Docker-first setup for VPS or home-server installs
 - Local playback state under `./data` so sessions can recover across restarts
 - No hosted-bot dependency, premium tier, or external dashboard required
@@ -126,18 +126,11 @@ YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
 | Command | Description |
 | --- | --- |
 | `/play <query>` or `/p <query>` | Play a YouTube URL/search or Spotify playlist link |
-| `/skip` or `/s` | Skip the current track |
-| `/pause` | Pause playback |
-| `/resume` | Resume playback |
-| `/queue` or `/q` | Show the queue |
-| `/clear` or `/c` | Clear queue and stop playback |
 | `/disconnect` or `/dc` | Disconnect from voice |
-| `/volume <0-200>` | Set player volume |
-| `/shuffle` | Shuffle the queue |
 | `/remove <position>` | Remove a queued track |
 | `/move <from_pos> <to_pos>` | Move a queued track |
-| `/loop <none\|track\|queue>` | Set loop mode |
-| `/nowplaying` or `/np` | Show the player panel |
+
+Playback controls such as pause, resume, skip, stop, queue, shuffle, loop, mute, and volume live on the persistent player panel.
 
 ## Local Development
 

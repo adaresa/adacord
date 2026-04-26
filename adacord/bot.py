@@ -11,7 +11,7 @@ from adacord.config import discord_guild_id, discord_token
 from adacord.events import handle_inactive_player, handle_track_end, handle_track_start
 from adacord.player import connect_lavalink
 from adacord.recovery import restore_playback_state
-from adacord.ui import PlayerControls
+from adacord.ui import PlayerPanelView
 
 load_dotenv()
 
@@ -29,11 +29,12 @@ class AdacordBot(commands.Bot):
     playback_restored: bool = False
 
     async def setup_hook(self) -> None:
-        controls = PlayerControls()
+        controls = PlayerPanelView()
         self.add_view(controls)
+        custom_ids = [item.custom_id for item in controls.walk_children() if getattr(item, "custom_id", None)]
         logger.info(
             "Registered persistent player controls: %s",
-            ", ".join(str(item.custom_id) for item in controls.children),
+            ", ".join(str(custom_id) for custom_id in custom_ids),
         )
 
         await connect_lavalink(self)

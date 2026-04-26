@@ -18,6 +18,7 @@ class GuildState:
     previous_volume: int = DEFAULT_VOLUME
     connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     idle_task: asyncio.Task[None] | None = None
+    display_refresh_task: asyncio.Task[None] | None = None
 
 
 guild_states: dict[int, GuildState] = {}

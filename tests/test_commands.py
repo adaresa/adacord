@@ -134,107 +134,16 @@ async def test_play_reports_playback_start_failure(monkeypatch) -> None:
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
 
 
-async def test_skip_handles_empty_and_active_player(monkeypatch) -> None:
-    interaction = FakeInteraction(guild=FakeGuild())
-    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: None)
-
-    await commands.skip_impl(interaction)
-    assert last_response_text(interaction) == "Nothing is playing."
-
-    player = FakePlayer(current=FakeTrack("Current"), playing=True)
-    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: player)
-    active = FakeInteraction(guild=player.guild)
-
-    await commands.skip_impl(active)
-
-    assert player.skip_calls == [True]
-    assert active.response.deferred is True
-    assert_no_text_response(active)
-
-
-async def test_pause_resume_volume_shuffle_loop_update_player(monkeypatch) -> None:
-    player = FakePlayer(current=FakeTrack("Current"), playing=True, queue=FakeQueue([FakeTrack("Next")]))
-    updates = []
-
-    async def fake_update(guild_id, player_arg):
-        updates.append((guild_id, player_arg))
-
-    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: player)
-    monkeypatch.setattr(commands, "update_display_for_guild", fake_update)
-
-    pause_interaction = FakeInteraction(guild=player.guild)
-    await commands.pause_impl(pause_interaction)
-    assert player.pause_calls[-1] is True
-    assert pause_interaction.response.deferred is True
-    assert_no_text_response(pause_interaction)
-
-    resume_interaction = FakeInteraction(guild=player.guild)
-    await commands.resume_impl(resume_interaction)
-    assert player.pause_calls[-1] is False
-    assert resume_interaction.response.deferred is True
-    assert_no_text_response(resume_interaction)
-
-    volume_interaction = FakeInteraction(guild=player.guild)
-    await commands.volume_impl(volume_interaction, 125)
-    assert player.volume_calls[-1] == 125
-    assert volume_interaction.response.deferred is True
-    assert_no_text_response(volume_interaction)
-
-    shuffle_interaction = FakeInteraction(guild=player.guild)
-    await commands.shuffle_impl(shuffle_interaction)
-    assert player.queue.shuffled is True
-    assert shuffle_interaction.response.deferred is True
-    assert_no_text_response(shuffle_interaction)
-
-    loop_interaction = FakeInteraction(guild=player.guild)
-    await commands.loop_impl(loop_interaction, "track")
-    assert loop_interaction.response.deferred is True
-    assert_no_text_response(loop_interaction)
-    assert len(updates) == 5
-
-
-async def test_volume_impl_clamps_direct_helper_inputs(monkeypatch) -> None:
-    player = FakePlayer()
-
-    async def fake_update(guild_id, player):
-        return None
-
-    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: player)
-    monkeypatch.setattr(commands, "update_display_for_guild", fake_update)
-
-    high_interaction = FakeInteraction(guild=player.guild)
-    await commands.volume_impl(high_interaction, 250)
-    assert player.volume_calls[-1] == 200
-    assert high_interaction.response.deferred is True
-    assert_no_text_response(high_interaction)
-
-    low_interaction = FakeInteraction(guild=player.guild)
-    await commands.volume_impl(low_interaction, -10)
-    assert player.volume_calls[-1] == 0
-    assert low_interaction.response.deferred is True
-    assert_no_text_response(low_interaction)
-
-
 async def test_empty_state_commands_respond_ephemerally(monkeypatch) -> None:
     monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: None)
 
     for impl, expected in [
-        (commands.pause_impl, "Nothing is playing."),
-        (commands.resume_impl, "Nothing is paused."),
-        (commands.clear_impl, "Not connected."),
         (commands.disconnect_impl, "Not connected."),
-        (commands.volume_impl, "Not connected."),
-        (commands.shuffle_impl, "Queue is empty."),
         (commands.remove_impl, "Queue is empty."),
-        (commands.loop_impl, "Not connected."),
     ]:
         interaction = FakeInteraction(guild=FakeGuild())
-        if impl is commands.volume_impl:
-            await impl(interaction, 50)
-        elif impl is commands.remove_impl:
+        if impl is commands.remove_impl:
             await impl(interaction, 1)
-        elif impl is commands.loop_impl:
-            await impl(interaction, "none")
         else:
             await impl(interaction)
         assert last_response_text(interaction) == expected
@@ -292,18 +201,3 @@ async def test_move_rejects_positions_below_one(monkeypatch) -> None:
     assert list(player.queue) == [first, second]
     assert last_response_text(interaction) == "Queue positions start at 1."
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-
-
-async def test_queue_and_nowplaying_send_ephemeral_embeds(monkeypatch) -> None:
-    player = FakePlayer(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Next")]))
-    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: player)
-
-    queue_interaction = FakeInteraction(guild=player.guild)
-    await commands.queue_impl(queue_interaction)
-    assert queue_interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-    assert queue_interaction.response.sent[-1]["kwargs"]["embed"].title == "Music Queue"
-
-    nowplaying_interaction = FakeInteraction(guild=player.guild)
-    await commands.nowplaying_impl(nowplaying_interaction)
-    assert nowplaying_interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-    assert nowplaying_interaction.response.sent[-1]["kwargs"]["embed"].title == "Music Player"

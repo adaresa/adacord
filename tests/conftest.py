@@ -215,6 +215,7 @@ class FakeMessage:
         self.content = content
         self.embed = embed
         self.view = view
+        self.flags = SimpleNamespace(components_v2=bool(view and view.has_components_v2()))
         self.deleted = False
         self.edits = []
         self.id = 789
@@ -223,6 +224,7 @@ class FakeMessage:
         self.edits.append(kwargs)
         self.embed = kwargs.get("embed", self.embed)
         self.view = kwargs.get("view", self.view)
+        self.flags = SimpleNamespace(components_v2=bool(self.view and self.view.has_components_v2()))
         return self
 
     async def delete(self):
