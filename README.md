@@ -6,7 +6,7 @@ It is packaged for Docker Compose and runs with Lavalink, YouTube search/playbac
 
 ## Why Adacord?
 
-Most Discord music bots are either hosted services with feature limits or command-heavy bots that clutter the music channel. Adacord is designed for small private servers that want a clean, self-hosted music experience:
+Most Discord music bots are either hosted services with feature limits behind paywalls or command-heavy bots that clutter the music channel. Adacord is designed for small private servers that want a clean, self-hosted music experience:
 
 - One persistent player panel that updates in place
 - Clickable controls for playback, queue, loop, shuffle, mute, and volume
