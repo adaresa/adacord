@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import wavelink
 
 from adacord.commands import setup_all_commands
-from adacord.config import discord_guild_id, discord_token, log_level
+from adacord.config import discord_guild_id, discord_token
 from adacord.events import handle_inactive_player, handle_track_end, handle_track_start
 from adacord.player import connect_lavalink
 from adacord.recovery import restore_playback_state
@@ -16,7 +16,7 @@ from adacord.ui import PlayerControls
 load_dotenv()
 
 logging.basicConfig(
-    level=getattr(logging, log_level(), logging.INFO),
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()],
 )

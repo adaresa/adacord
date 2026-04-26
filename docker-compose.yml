@@ -14,7 +14,6 @@ services:
     restart: unless-stopped
     environment:
       _JAVA_OPTIONS: "-Xmx512M"
-      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-youshallnotpass}
       YOUTUBE_OAUTH_ENABLED: ${YOUTUBE_OAUTH_ENABLED:-false}
       YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
       YOUTUBE_OAUTH_SKIP_INITIALIZATION: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:-true}
@@ -23,7 +22,7 @@ services:
     expose:
       - "2333"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider --header=\"Authorization: $${LAVALINK_PASSWORD:-youshallnotpass}\" http://127.0.0.1:2333/version || exit 1"]
+      test: ["CMD-SHELL", "wget -q --spider --header=\"Authorization: adacord-internal-lavalink\" http://127.0.0.1:2333/version || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 10
@@ -33,10 +32,6 @@ services:
   bot:
     build: .
     env_file: .env
-    environment:
-      LAVALINK_URI: http://lavalink:2333
-      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-youshallnotpass}
-      PLAYBACK_STATE_FILE: /app/data/playback_state.json
     volumes:
       - ./data:/app/data
     depends_on:

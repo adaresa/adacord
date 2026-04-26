@@ -1,6 +1,9 @@
 import os
 
 DEFAULT_VOLUME = 50
+LAVALINK_URI = "http://lavalink:2333"
+LAVALINK_PASSWORD = "adacord-internal-lavalink"
+PLAYBACK_STATE_FILE = "data/playback_state.json"
 
 
 def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -37,10 +40,6 @@ def discord_guild_id() -> str | None:
     return os.getenv("DISCORD_GUILD_ID")
 
 
-def log_level() -> str:
-    return os.getenv("LOG_LEVEL", "INFO").upper()
-
-
 def message_delete_after() -> float:
     return env_float("MESSAGE_DELETE_AFTER", 5.0, minimum=0.0)
 
@@ -50,11 +49,11 @@ def default_volume() -> int:
 
 
 def lavalink_uri() -> str:
-    return os.getenv("LAVALINK_URI", "http://lavalink:2333")
+    return LAVALINK_URI
 
 
 def lavalink_password() -> str:
-    return os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+    return LAVALINK_PASSWORD
 
 
 def lavalink_connect_retries() -> int:
@@ -82,4 +81,4 @@ def voice_connect_timeout() -> float:
 
 
 def playback_state_file() -> str:
-    return os.getenv("PLAYBACK_STATE_FILE", "data/playback_state.json")
+    return PLAYBACK_STATE_FILE
