@@ -19,6 +19,7 @@ from adacord.state import get_guild_state
 from adacord.ui import (
     PlayerControls,
     QueueView,
+    acknowledge,
     build_player_embed,
     build_queue_embed,
     create_or_update_display,
@@ -26,7 +27,6 @@ from adacord.ui import (
     respond,
     update_display_for_guild,
 )
-from adacord.utils import track_display_title
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await respond(interaction, "Join a voice channel first.", ephemeral=True)
         return
 
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     try:
         player = await ensure_player(interaction.guild, channel)
     except Exception as exc:
@@ -84,10 +84,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await update_display_for_guild(interaction.guild.id, player)
     await save_player_state(player)
 
-    if summary.added == 1:
-        await respond(interaction, f"Added: **{summary.title}**")
-    else:
-        await respond(interaction, f"Added {summary.added} tracks from **{summary.title}**.")
+    await acknowledge(interaction)
 
 
 async def skip_impl(interaction: discord.Interaction) -> None:
@@ -96,7 +93,7 @@ async def skip_impl(interaction: discord.Interaction) -> None:
         await respond(interaction, "Nothing is playing.", ephemeral=True)
         return
     await player.skip(force=True)
-    await respond(interaction, "Skipped.")
+    await acknowledge(interaction)
 
 
 async def clear_impl(interaction: discord.Interaction) -> None:
@@ -105,7 +102,7 @@ async def clear_impl(interaction: discord.Interaction) -> None:
         await respond(interaction, "Not connected.", ephemeral=True)
         return
     await clear_player(player)
-    await respond(interaction, "Cleared the queue.")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -116,7 +113,7 @@ async def disconnect_impl(interaction: discord.Interaction) -> None:
         return
     guild_id = player.guild.id
     await disconnect_player(player)
-    await respond(interaction, "Disconnected.")
+    await acknowledge(interaction)
     await update_display_for_guild(guild_id, None)
 
 
@@ -136,7 +133,7 @@ async def pause_impl(interaction: discord.Interaction) -> None:
         return
     await player.pause(True)
     await save_player_state(player)
-    await respond(interaction, "Paused.")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -147,7 +144,7 @@ async def resume_impl(interaction: discord.Interaction) -> None:
         return
     await player.pause(False)
     await save_player_state(player)
-    await respond(interaction, "Resumed.")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -168,7 +165,7 @@ async def volume_impl(interaction: discord.Interaction, level: int) -> None:
     volume = max(0, min(200, int(level)))
     await set_volume(player, volume)
     await save_player_state(player)
-    await respond(interaction, f"Volume: {volume}%")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -179,7 +176,7 @@ async def shuffle_impl(interaction: discord.Interaction) -> None:
         return
     player.queue.shuffle()
     await save_player_state(player)
-    await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -198,7 +195,7 @@ async def remove_impl(interaction: discord.Interaction, position: int) -> None:
     removed = tracks[position - 1]
     del player.queue[position - 1]
     await save_player_state(player)
-    await respond(interaction, f"Removed **{track_display_title(removed)}**.")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -218,7 +215,7 @@ async def move_impl(interaction: discord.Interaction, from_pos: int, to_pos: int
     del player.queue[from_pos - 1]
     player.queue.put_at(to_pos - 1, track)
     await save_player_state(player)
-    await respond(interaction, f"Moved **{track_display_title(track)}** to position {to_pos}.")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 
@@ -230,7 +227,7 @@ async def loop_impl(interaction: discord.Interaction, mode: app_commands.Choice[
     mode_value = mode.value if isinstance(mode, app_commands.Choice) else str(mode)
     set_loop_mode(player, mode_value)
     await save_player_state(player)
-    await respond(interaction, f"Loop: {mode_value}")
+    await acknowledge(interaction)
     await update_display_for_guild(player.guild.id, player)
 
 

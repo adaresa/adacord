@@ -12,7 +12,6 @@ from adacord.config import (
     lavalink_connect_retries,
     lavalink_voice_ready_interval,
     lavalink_voice_ready_timeout,
-    message_delete_after,
     playback_state_file,
     player_idle_timeout,
     voice_connect_timeout,
@@ -108,7 +107,6 @@ def test_track_extras_support_dict_and_attribute_access(fake_track_factory) -> N
 @pytest.mark.parametrize(
     ("env_name", "values"),
     [
-        ("MESSAGE_DELETE_AFTER", [(None, 5), ("not-a-number", 5), ("0", 0), ("-10", 0), ("2.5", 2.5)]),
         ("DEFAULT_VOLUME", [(None, 50), ("not-a-number", 50), ("300", 200), ("-10", 0), ("75", 75)]),
         ("VOICE_CONNECT_TIMEOUT", [(None, 30), ("not-a-number", 30), ("-10", 0), ("45.5", 45.5)]),
         ("LAVALINK_CONNECT_RETRIES", [(None, 30), ("not-a-number", 30), ("0", 1), ("5", 5)]),
@@ -120,7 +118,6 @@ def test_track_extras_support_dict_and_attribute_access(fake_track_factory) -> N
 )
 def test_env_defaults_and_clamping(monkeypatch, env_name: str, values) -> None:
     readers = {
-        "MESSAGE_DELETE_AFTER": message_delete_after,
         "DEFAULT_VOLUME": default_volume,
         "VOICE_CONNECT_TIMEOUT": voice_connect_timeout,
         "LAVALINK_CONNECT_RETRIES": lavalink_connect_retries,

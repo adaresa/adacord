@@ -162,24 +162,15 @@ async def test_track_start_updates_display(monkeypatch) -> None:
     assert calls == [(player.guild.id, player)]
 
 
-async def test_inactive_player_sends_idle_notice_and_updates_display(monkeypatch) -> None:
+async def test_inactive_player_updates_display(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"))
-    state = get_guild_state(player.guild.id)
-    state.display_channel = FakeTextChannel()
     calls = []
-
-    async def fake_send(channel, message):
-        calls.append(("send", channel, message))
 
     async def fake_update(guild_id, seen_player):
         calls.append(("update", guild_id, seen_player))
 
-    monkeypatch.setattr(events, "send_transient", fake_send)
     monkeypatch.setattr(events, "update_display_for_guild", fake_update)
 
     await events.handle_inactive_player(player)
 
-    assert calls == [
-        ("send", state.display_channel, "Disconnected after being idle."),
-        ("update", player.guild.id, player),
-    ]
+    assert calls == [("update", player.guild.id, player)]
