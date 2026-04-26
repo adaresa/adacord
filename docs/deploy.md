@@ -19,14 +19,10 @@ Create `/opt/adacord/.env` manually:
 ```bash
 DISCORD_TOKEN=your-discord-bot-token
 DISCORD_GUILD_ID=your-server-id
-LOG_LEVEL=INFO
 MESSAGE_DELETE_AFTER=5
 DEFAULT_VOLUME=50
-LAVALINK_PASSWORD=choose-a-password
-LAVALINK_URI=http://lavalink:2333
 PLAYER_IDLE_TIMEOUT=30
 VOICE_CONNECT_TIMEOUT=30
-PLAYBACK_STATE_FILE=/app/data/playback_state.json
 ```
 
 If YouTube playback fails on the VPS with `This video requires login`, add OAuth settings to the same `.env` file using a burner Google/YouTube account:
@@ -56,7 +52,7 @@ Create a dedicated SSH key for GitHub Actions. Put the public key in the VPS use
 | `VPS_KNOWN_HOSTS` | Output from `ssh-keyscan -p <port> <host>` |
 | `APP_DIR` | Optional app path, defaults to `/opt/adacord` |
 
-Do not put Discord tokens, Lavalink passwords, or `.env` values in workflow files.
+Do not put Discord tokens or `.env` values in workflow files.
 
 ## YouTube OAuth
 
@@ -124,7 +120,8 @@ docker image prune -f
 
 The `.env` file is untracked, so it remains on the server across deploys.
 The Compose stack also mounts `./data` into the bot container for playback recovery state, so bot restarts can rebuild
-the active queue and player display.
+the active queue and player display. Lavalink and the YouTube cipher sidecar use internal Compose credentials and do
+not need `.env` settings.
 
 ## Branch Flow
 

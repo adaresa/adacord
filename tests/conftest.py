@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import adacord.config as config
 from adacord.state import guild_states
 
 
@@ -297,7 +298,7 @@ class FakeInteraction:
 
 @pytest.fixture(autouse=True)
 def clear_guild_state(monkeypatch, tmp_path):
-    monkeypatch.setenv("PLAYBACK_STATE_FILE", str(tmp_path / "playback_state.json"))
+    monkeypatch.setattr(config, "PLAYBACK_STATE_FILE", str(tmp_path / "playback_state.json"))
     guild_states.clear()
     yield
     guild_states.clear()

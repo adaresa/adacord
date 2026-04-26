@@ -137,12 +137,10 @@ def test_env_defaults_and_clamping(monkeypatch, env_name: str, values) -> None:
         assert readers[env_name]() == expected
 
 
-def test_playback_state_file_default_and_override(monkeypatch) -> None:
-    monkeypatch.delenv("PLAYBACK_STATE_FILE", raising=False)
-    assert playback_state_file() == "data/playback_state.json"
-
+def test_playback_state_file_uses_internal_data_path(monkeypatch) -> None:
+    monkeypatch.setattr("adacord.config.PLAYBACK_STATE_FILE", "data/playback_state.json")
     monkeypatch.setenv("PLAYBACK_STATE_FILE", "custom/state.json")
-    assert playback_state_file() == "custom/state.json"
+    assert playback_state_file() == "data/playback_state.json"
 
 
 def test_track_payload_round_trips_to_playable() -> None:
