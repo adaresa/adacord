@@ -21,6 +21,32 @@ class FakeTrack:
         self.length = length
         self.source = source
         self.extras = {}
+        self.encoded = f"encoded:{title}"
+        self.identifier = title.lower().replace(" ", "-")
+        self.is_seekable = True
+        self.is_stream = False
+        self.position = 0
+        self.uri = f"https://example.test/{self.identifier}"
+        self.artwork = None
+        self.isrc = None
+        self.raw_data = {
+            "encoded": self.encoded,
+            "info": {
+                "identifier": self.identifier,
+                "isSeekable": self.is_seekable,
+                "author": self.author,
+                "length": self.length,
+                "isStream": self.is_stream,
+                "position": self.position,
+                "title": self.title,
+                "uri": self.uri,
+                "artworkUrl": self.artwork,
+                "isrc": self.isrc,
+                "sourceName": self.source,
+            },
+            "pluginInfo": {},
+            "userData": {},
+        }
 
 
 class FakeQueue:
@@ -114,10 +140,14 @@ class FakePlayer:
         self.move_calls = []
         self.seek_calls: list[int] = []
 
-    async def play(self, track: FakeTrack, *, volume: int | None = None) -> None:
+    @property
+    def position(self) -> int:
+        return self.current.position if self.current else 0
+
+    async def play(self, track: FakeTrack, *, volume: int | None = None, **kwargs) -> None:
         self.current = track
         self.playing = True
-        self.paused = False
+        self.paused = bool(kwargs.get("paused", False))
         self.volume = volume
         self.play_calls.append((track, volume))
 
@@ -166,6 +196,7 @@ class FakeVoiceChannel:
         self.guild = guild or FakeGuild()
         self.player = player
         self.connect_kwargs = None
+        self.id = 456
 
     async def connect(self, **kwargs):
         self.connect_kwargs = kwargs
@@ -182,6 +213,7 @@ class FakeMessage:
         self.view = view
         self.deleted = False
         self.edits = []
+        self.id = 789
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
@@ -196,6 +228,7 @@ class FakeMessage:
 class FakeTextChannel:
     def __init__(self):
         self.sent: list[FakeMessage] = []
+        self.id = 321
 
     async def send(self, content: str | None = None, **kwargs):
         message = FakeMessage(content, embed=kwargs.get("embed"), view=kwargs.get("view"))
@@ -256,7 +289,8 @@ class FakeInteraction:
 
 
 @pytest.fixture(autouse=True)
-def clear_guild_state():
+def clear_guild_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLAYBACK_STATE_FILE", str(tmp_path / "playback_state.json"))
     guild_states.clear()
     yield
     guild_states.clear()

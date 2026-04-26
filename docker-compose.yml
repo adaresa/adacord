@@ -37,6 +37,9 @@ services:
     environment:
       LAVALINK_URI: http://lavalink:2333
       LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-youshallnotpass}
+      PLAYBACK_STATE_FILE: /app/data/playback_state.json
+    volumes:
+      - ./data:/app/data
     depends_on:
       lavalink:
         condition: service_healthy

@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from adacord.persistence import save_player_state
 from adacord.player import (
     add_tracks,
     clear_player,
@@ -81,6 +82,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await create_or_update_display(interaction.guild.id, interaction.channel, player)
     else:
         await update_display_for_guild(interaction.guild.id, player)
+    save_player_state(player)
 
     if summary.added == 1:
         await respond(interaction, f"Added: **{summary.title}**")
@@ -133,6 +135,7 @@ async def pause_impl(interaction: discord.Interaction) -> None:
         await respond(interaction, "Nothing is playing.", ephemeral=True)
         return
     await player.pause(True)
+    save_player_state(player)
     await respond(interaction, "Paused.")
     await update_display_for_guild(player.guild.id, player)
 
@@ -143,6 +146,7 @@ async def resume_impl(interaction: discord.Interaction) -> None:
         await respond(interaction, "Nothing is paused.", ephemeral=True)
         return
     await player.pause(False)
+    save_player_state(player)
     await respond(interaction, "Resumed.")
     await update_display_for_guild(player.guild.id, player)
 
@@ -163,6 +167,7 @@ async def volume_impl(interaction: discord.Interaction, level: int) -> None:
         return
     volume = max(0, min(200, int(level)))
     await set_volume(player, volume)
+    save_player_state(player)
     await respond(interaction, f"Volume: {volume}%")
     await update_display_for_guild(player.guild.id, player)
 
@@ -173,6 +178,7 @@ async def shuffle_impl(interaction: discord.Interaction) -> None:
         await respond(interaction, "Queue is empty.", ephemeral=True)
         return
     player.queue.shuffle()
+    save_player_state(player)
     await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
     await update_display_for_guild(player.guild.id, player)
 
@@ -191,6 +197,7 @@ async def remove_impl(interaction: discord.Interaction, position: int) -> None:
         return
     removed = tracks[position - 1]
     del player.queue[position - 1]
+    save_player_state(player)
     await respond(interaction, f"Removed **{track_display_title(removed)}**.")
     await update_display_for_guild(player.guild.id, player)
 
@@ -210,6 +217,7 @@ async def move_impl(interaction: discord.Interaction, from_pos: int, to_pos: int
     track = tracks[from_pos - 1]
     del player.queue[from_pos - 1]
     player.queue.put_at(to_pos - 1, track)
+    save_player_state(player)
     await respond(interaction, f"Moved **{track_display_title(track)}** to position {to_pos}.")
     await update_display_for_guild(player.guild.id, player)
 
@@ -221,6 +229,7 @@ async def loop_impl(interaction: discord.Interaction, mode: app_commands.Choice[
         return
     mode_value = mode.value if isinstance(mode, app_commands.Choice) else str(mode)
     set_loop_mode(player, mode_value)
+    save_player_state(player)
     await respond(interaction, f"Loop: {mode_value}")
     await update_display_for_guild(player.guild.id, player)
 

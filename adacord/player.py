@@ -4,6 +4,7 @@ import logging
 import discord
 import wavelink
 
+from adacord.persistence import clear_guild_state as clear_saved_guild_state
 from adacord.config import (
     default_volume,
     lavalink_connect_delay,
@@ -66,6 +67,7 @@ async def ensure_player(
     target_channel: discord.VoiceChannel | discord.StageChannel,
 ) -> wavelink.Player:
     state = get_guild_state(guild.id)
+    state.voice_channel_id = getattr(target_channel, "id", None)
     async with state.connect_lock:
         player = get_player(guild)
         if player and player.connected:
@@ -169,6 +171,7 @@ async def clear_player(player: wavelink.Player) -> None:
     set_loop_mode(player, "none")
     player.queue.clear()
     player.queue.history.clear()
+    clear_saved_guild_state(player.guild.id)
     if player.playing or player.paused:
         await player.skip(force=True)
 
