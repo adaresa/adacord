@@ -13,6 +13,7 @@ AGENTS.md
 data/
 
 # Docker
+docker-compose.override.yml
 *.db
 *.sqlite3
 lavalink/plugins/
