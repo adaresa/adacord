@@ -3,6 +3,7 @@ import html
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Iterable
 from urllib.error import URLError
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 SONG_SEARCH_LIMIT = 8
+SPOTIFY_PUBLIC_SEARCH_CONCURRENCY = 16
 SONG_MIN_LENGTH_MS = 60_000
 SONG_IDEAL_MAX_LENGTH_MS = 7 * 60_000
 SONG_SOFT_MAX_LENGTH_MS = 10 * 60_000
@@ -206,35 +208,50 @@ async def spotify_playlist_queries(playlist_id: str) -> list[str]:
     return queries
 
 
+async def resolve_spotify_public_tracks(queries: list[str], requester: str) -> list[wavelink.Playable]:
+    logger.info("Resolving %s Spotify tracks with concurrency %s", len(queries), SPOTIFY_PUBLIC_SEARCH_CONCURRENCY)
+    semaphore = asyncio.Semaphore(SPOTIFY_PUBLIC_SEARCH_CONCURRENCY)
+
+    async def resolve(track_query: str) -> list[wavelink.Playable]:
+        async with semaphore:
+            try:
+                return await search_youtube(track_query, requester)
+            except Exception as exc:
+                logger.warning("Could not resolve Spotify track %r: %s", track_query, exc)
+                return []
+
+    results = await asyncio.gather(*(resolve(track_query) for track_query in queries))
+    return [track for matches in results for track in matches]
+
+
+async def load_spotify_with_public_metadata(
+    playlist_id: str,
+    requester: str,
+) -> tuple[list[wavelink.Playable], LoadSummary]:
+    started = time.perf_counter()
+    queries = await spotify_playlist_queries(playlist_id)
+    tracks = await resolve_spotify_public_tracks(queries, requester)
+    if not tracks:
+        raise RuntimeError("Could not resolve tracks from public Spotify metadata.")
+
+    logger.info(
+        "Loaded %s/%s Spotify tracks with public metadata in %.2fs",
+        len(tracks),
+        len(queries),
+        time.perf_counter() - started,
+    )
+    return tracks, LoadSummary("Spotify playlist", len(tracks), "spotify-public")
+
+
 async def load_tracks(query: str, requester: str) -> tuple[list[wavelink.Playable], LoadSummary]:
     query = query.strip()
     playlist_id = spotify_playlist_id(query)
 
     if playlist_id:
         try:
-            queries = await spotify_playlist_queries(playlist_id)
-            tracks: list[wavelink.Playable] = []
-            for track_query in queries:
-                try:
-                    matches = await search_youtube(track_query, requester)
-                except Exception as exc:
-                    logger.warning("Could not resolve Spotify track %r: %s", track_query, exc)
-                    continue
-                tracks.extend(matches)
-
-            if tracks:
-                return tracks, LoadSummary("Spotify playlist", len(tracks), "spotify-public")
+            return await load_spotify_with_public_metadata(playlist_id, requester)
         except Exception as exc:
-            logger.info("Spotify public playlist metadata load failed; trying LavaSrc: %s", exc)
-
-        try:
-            found = await wavelink.Playable.search(query)
-            if isinstance(found, wavelink.Playlist) and found.tracks:
-                tracks = list(found.tracks)
-                apply_requester(tracks, requester, query)
-                return tracks, LoadSummary(found.name or "Spotify playlist", len(tracks), "lavasrc")
-        except Exception as exc:
-            logger.info("LavaSrc Spotify load failed: %s", exc)
+            logger.info("Spotify public playlist metadata load failed: %s", exc)
 
         raise RuntimeError("Could not load that Spotify playlist.")
 
