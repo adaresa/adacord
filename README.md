@@ -100,7 +100,7 @@ PLAYER_IDLE_TIMEOUT=30
 VOICE_CONNECT_TIMEOUT=30
 ```
 
-If YouTube playback fails on a VPS or datacenter IP with a login-required error, enable YouTube OAuth using a burner Google/YouTube account:
+If YouTube playback fails on a VPS or datacenter IP with a login-required error, enable YouTube OAuth using a dedicated Google/YouTube account:
 
 ```env
 YOUTUBE_OAUTH_ENABLED=true

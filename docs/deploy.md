@@ -1,10 +1,10 @@
-# Deploying Adacord
+# Automated VPS Deployment
 
-This repo is safe to keep public as long as secrets stay out of git. The bot's real environment belongs in a server-local `.env` file, and the deploy key belongs in GitHub Actions secrets.
+This guide describes one way to deploy Adacord to a VPS with GitHub Actions. It is optional; self-hosted users can run the stack manually with the README quick start.
 
-## VPS Setup
+## Server Setup
 
-Install Docker and the Docker Compose plugin on the VPS, then clone the repo:
+Install Docker and the Docker Compose plugin on the server, then clone the repository:
 
 ```bash
 sudo mkdir -p /opt/adacord
@@ -14,7 +14,7 @@ cd /opt/adacord
 git checkout main
 ```
 
-Create `/opt/adacord/.env` manually:
+Create `/opt/adacord/.env`:
 
 ```bash
 DISCORD_TOKEN=your-discord-bot-token
@@ -25,15 +25,7 @@ PLAYER_IDLE_TIMEOUT=30
 VOICE_CONNECT_TIMEOUT=30
 ```
 
-If YouTube playback fails on the VPS with `This video requires login`, add OAuth settings to the same `.env` file using a burner Google/YouTube account:
-
-```bash
-YOUTUBE_OAUTH_ENABLED=true
-YOUTUBE_OAUTH_REFRESH_TOKEN=your-refresh-token
-YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
-```
-
-Start the stack once:
+Start the stack:
 
 ```bash
 docker compose pull
@@ -42,24 +34,37 @@ docker compose up -d
 
 ## GitHub Actions Secrets
 
-Create a dedicated SSH key for GitHub Actions. Put the public key in the VPS user's `~/.ssh/authorized_keys`, then add these repository secrets in GitHub:
+Create a dedicated SSH key for deployments. Add the public key to the server user's `~/.ssh/authorized_keys`, then add these repository secrets in GitHub:
 
 | Secret | Value |
 | --- | --- |
-| `VPS_HOST` | VPS hostname or IP address |
-| `VPS_USER` | SSH user on the VPS |
+| `VPS_HOST` | Server hostname or IP address |
+| `VPS_USER` | SSH user on the server |
 | `VPS_PORT` | SSH port, usually `22` |
-| `VPS_SSH_KEY` | Private deploy key |
+| `VPS_SSH_KEY` | Private deployment key |
 | `VPS_KNOWN_HOSTS` | Output from `ssh-keyscan -p <port> <host>` |
 | `APP_DIR` | Optional app path, defaults to `/opt/adacord` |
 
-Do not put Discord tokens or `.env` values in workflow files.
+## Deploy Flow
+
+Merging to `main` runs CI. If the push passes, `.github/workflows/deploy.yml` connects to the server and runs:
+
+```bash
+cd /opt/adacord
+git fetch origin main
+git reset --hard origin/main
+docker compose pull
+docker compose up -d
+docker image prune -f
+```
+
+The `.env` file and `./data` directory are untracked, so configuration and playback recovery state remain on the server across deploys.
 
 ## YouTube OAuth
 
-VPS/datacenter IPs are more likely to trigger YouTube bot checks than a home connection. If Lavalink logs `This video requires login` for normal public videos, use the Lavalink YouTube plugin's OAuth flow.
+VPS and datacenter IPs are more likely to trigger YouTube bot checks than home connections. If Lavalink logs `This video requires login` for normal public videos, use the Lavalink YouTube plugin OAuth flow with a dedicated Google/YouTube account.
 
-Temporarily enable initialization on the VPS:
+Temporarily enable initialization:
 
 ```bash
 cd /opt/adacord
@@ -88,13 +93,13 @@ YOUTUBE_OAUTH_REFRESH_TOKEN=the-token-from-the-logs
 YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
 ```
 
-Restart once more:
+Restart again:
 
 ```bash
 docker compose up -d
 ```
 
-Use a burner account, not your primary Google account. The youtube-source docs warn that OAuth is not guaranteed and can carry account risk.
+OAuth is not guaranteed to work forever and can carry account risk, so avoid using an important personal account.
 
 ## YouTube Remote Cipher
 
@@ -107,48 +112,18 @@ docker compose ps yt-cipher
 docker compose logs --tail=80 yt-cipher
 ```
 
-## Deploy Flow
+## Local Validation
 
-Merging to `main` runs CI first. If CI succeeds for that push, `.github/workflows/deploy.yml` SSHes into the VPS and runs:
-
-```bash
-cd /opt/adacord
-git fetch origin main
-git reset --hard origin/main
-docker compose pull
-docker compose up -d
-docker image prune -f
-```
-
-The `.env` file is untracked, so it remains on the server across deploys.
-The Compose stack also mounts `./data` into the bot container for playback recovery state, so bot restarts can rebuild
-the active queue and player display.
-
-## Branch Flow
-
-Use `dev` for day-to-day changes and `main` for the deployed bot.
+Run static checks without starting a Discord session:
 
 ```bash
-git switch dev
-# make changes, test locally, push dev
-git push origin dev
+python -m py_compile bot.py adacord/*.py tests/*.py
+python -m pytest
+docker compose config --no-interpolate
+docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
 ```
 
-When a batch of changes is ready, open a pull request from `dev` to `main`. Merging to `main` is what triggers the VPS deploy.
-
-## Local Bot Testing
-
-Do not run a local bot with the production `DISCORD_TOKEN` while the VPS bot is running. Discord allows only one active gateway session per bot token, so the local process and VPS process will fight each other.
-
-Recommended setup:
-
-- Create a second Discord application/bot for development.
-- Invite the dev bot to the same server, ideally with a distinct name/avatar.
-- Keep a local-only `.env.dev` or alternate `.env` containing the dev bot token.
-- Use the same `DISCORD_GUILD_ID` so slash commands sync instantly to your server.
-- Stop the local dev bot after testing; production keeps running on the VPS.
-
-For local Docker testing, copy `.env.example` to `.env` and use the dev bot token. To test local Python changes, enable the build override first:
+For local Docker testing with source builds:
 
 ```bash
 cp docker-compose.override.example.yml docker-compose.override.yml
@@ -156,27 +131,7 @@ docker compose up -d --build
 docker compose logs -f bot lavalink yt-cipher
 ```
 
-If you only need static validation, run the checks without starting a Discord session:
-
-```bash
-python -m py_compile bot.py adacord/*.py tests/*.py
-python -m pytest
-docker compose config --no-interpolate
-docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
-```
-
-## Checks
-
-Pull requests and pushes to `main` run `.github/workflows/ci.yml`:
-
-```bash
-python -m py_compile bot.py adacord/*.py tests/*.py
-python -m pytest
-docker compose config --no-interpolate
-docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
-```
-
-After the first deploy, confirm the VPS state with:
+After deployment, confirm the server state with:
 
 ```bash
 docker compose ps
