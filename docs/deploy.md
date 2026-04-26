@@ -4,7 +4,7 @@ This repo is safe to keep public as long as secrets stay out of git. The bot's r
 
 ## VPS Setup
 
-Install Docker and the Docker Compose plugin on the VPS, then clone the public repo:
+Install Docker and the Docker Compose plugin on the VPS, then clone the repo:
 
 ```bash
 sudo mkdir -p /opt/adacord
@@ -36,7 +36,8 @@ YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
 Start the stack once:
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 ## GitHub Actions Secrets
@@ -97,7 +98,7 @@ Use a burner account, not your primary Google account. The youtube-source docs w
 
 ## YouTube Remote Cipher
 
-The Compose stack includes a private `yt-cipher` service for YouTube signature deciphering. This is used by Lavalink through the internal Docker network only; do not publish port `8001` publicly. Lavalink and `yt-cipher` share an internal Compose token, so no `.env` setting is required for this service.
+The Compose stack includes a private `yt-cipher` service for YouTube signature deciphering. It is used by Lavalink through the internal Docker network only; do not publish port `8001` publicly.
 
 If Lavalink logs `Must find sig function`, confirm the cipher service is running:
 
@@ -114,14 +115,14 @@ Merging to `main` runs CI first. If CI succeeds for that push, `.github/workflow
 cd /opt/adacord
 git fetch origin main
 git reset --hard origin/main
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker image prune -f
 ```
 
 The `.env` file is untracked, so it remains on the server across deploys.
 The Compose stack also mounts `./data` into the bot container for playback recovery state, so bot restarts can rebuild
-the active queue and player display. Lavalink and the YouTube cipher sidecar use internal Compose credentials and do
-not need `.env` settings.
+the active queue and player display.
 
 ## Branch Flow
 
@@ -147,9 +148,10 @@ Recommended setup:
 - Use the same `DISCORD_GUILD_ID` so slash commands sync instantly to your server.
 - Stop the local dev bot after testing; production keeps running on the VPS.
 
-For local Docker testing, copy `.env.example` to `.env` and use the dev bot token:
+For local Docker testing, copy `.env.example` to `.env` and use the dev bot token. To test local Python changes, enable the build override first:
 
 ```bash
+cp docker-compose.override.example.yml docker-compose.override.yml
 docker compose up -d --build
 docker compose logs -f bot lavalink yt-cipher
 ```
@@ -160,6 +162,7 @@ If you only need static validation, run the checks without starting a Discord se
 python -m py_compile bot.py adacord/*.py tests/*.py
 python -m pytest
 docker compose config --no-interpolate
+docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
 ```
 
 ## Checks
@@ -170,6 +173,7 @@ Pull requests and pushes to `main` run `.github/workflows/ci.yml`:
 python -m py_compile bot.py adacord/*.py tests/*.py
 python -m pytest
 docker compose config --no-interpolate
+docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
 ```
 
 After the first deploy, confirm the VPS state with:

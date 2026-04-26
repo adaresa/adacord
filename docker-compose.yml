@@ -30,7 +30,7 @@ services:
       - yt-cipher
 
   bot:
-    build: .
+    image: ghcr.io/adaresa/adacord:latest
     env_file: .env
     volumes:
       - ./data:/app/data
