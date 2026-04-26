@@ -40,10 +40,6 @@ def discord_guild_id() -> str | None:
     return os.getenv("DISCORD_GUILD_ID")
 
 
-def message_delete_after() -> float:
-    return env_float("MESSAGE_DELETE_AFTER", 5.0, minimum=0.0)
-
-
 def default_volume() -> int:
     return env_int("DEFAULT_VOLUME", DEFAULT_VOLUME, minimum=0, maximum=200)
 

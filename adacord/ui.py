@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -6,37 +5,12 @@ import discord
 import wavelink
 
 from adacord.persistence import save_player_state
-from adacord.config import default_volume, message_delete_after
+from adacord.config import default_volume
 from adacord.player import clear_player, get_player, queue_items, set_loop_mode, set_volume
 from adacord.state import get_guild_state
 from adacord.utils import format_duration, track_display_title, track_requester
 
 logger = logging.getLogger(__name__)
-
-
-async def delete_message_later(message: discord.Message, delay: float) -> None:
-    if delay <= 0:
-        return
-    await asyncio.sleep(delay)
-    try:
-        await message.delete()
-    except discord.HTTPException:
-        pass
-
-
-def schedule_delete(message: discord.Message | None, delay: float) -> None:
-    if message and delay > 0:
-        asyncio.create_task(delete_message_later(message, delay))
-
-
-async def send_transient(
-    channel: discord.abc.Messageable,
-    message: str,
-) -> discord.Message | None:
-    delay = message_delete_after()
-    sent = await channel.send(message)
-    schedule_delete(sent, delay)
-    return sent
 
 
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
@@ -51,24 +25,33 @@ async def respond(
     *,
     ephemeral: bool = False,
 ) -> None:
-    delay = message_delete_after()
     try:
         if interaction.response.is_done():
-            sent = await interaction.followup.send(
+            await interaction.followup.send(
                 message,
                 ephemeral=ephemeral,
-                wait=not ephemeral and delay > 0,
             )
-            if not ephemeral:
-                schedule_delete(sent, delay)
         else:
             await interaction.response.send_message(
                 message,
                 ephemeral=ephemeral,
-                delete_after=None if ephemeral else delay or None,
             )
     except (discord.NotFound, discord.HTTPException):
         logger.exception("Failed to send interaction response")
+
+
+async def acknowledge(interaction: discord.Interaction) -> None:
+    try:
+        if interaction.response.is_done():
+            await interaction.delete_original_response()
+        else:
+            await interaction.response.defer()
+            if interaction.type is discord.InteractionType.application_command:
+                await interaction.delete_original_response()
+    except discord.NotFound:
+        pass
+    except discord.HTTPException:
+        logger.exception("Failed to acknowledge interaction")
 
 
 def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord.Embed:
@@ -135,11 +118,11 @@ class PlayerControls(discord.ui.View):
     async def restart(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or not player.current:
-            await respond(interaction, "Nothing to restart.")
+            await respond(interaction, "Nothing to restart.", ephemeral=True)
             return
         await player.seek(0)
         await save_player_state(player)
-        await respond(interaction, "Restarted.")
+        await acknowledge(interaction)
 
     @discord.ui.button(
         emoji="\u23ef\ufe0f",
@@ -150,12 +133,12 @@ class PlayerControls(discord.ui.View):
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or not player.current:
-            await respond(interaction, "Nothing to pause or resume.")
+            await respond(interaction, "Nothing to pause or resume.", ephemeral=True)
             return
         should_pause = not player.paused
         await player.pause(should_pause)
         await save_player_state(player)
-        await respond(interaction, "Paused." if should_pause else "Resumed.")
+        await acknowledge(interaction)
         await self.refresh(interaction)
 
     @discord.ui.button(
@@ -167,10 +150,10 @@ class PlayerControls(discord.ui.View):
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or not player.current:
-            await respond(interaction, "Nothing to skip.")
+            await respond(interaction, "Nothing to skip.", ephemeral=True)
             return
         await player.skip(force=True)
-        await respond(interaction, "Skipped.")
+        await acknowledge(interaction)
 
     @discord.ui.button(
         emoji="\u23f9\ufe0f",
@@ -181,10 +164,10 @@ class PlayerControls(discord.ui.View):
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
-            await respond(interaction, "Not connected.")
+            await respond(interaction, "Not connected.", ephemeral=True)
             return
         await clear_player(player)
-        await respond(interaction, "Stopped and cleared the queue.")
+        await acknowledge(interaction)
         await self.refresh(interaction)
 
     @discord.ui.button(
@@ -196,13 +179,13 @@ class PlayerControls(discord.ui.View):
     async def volume_down(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
-            await respond(interaction, "Not connected.")
+            await respond(interaction, "Not connected.", ephemeral=True)
             return
         current_volume = player.volume if player.volume is not None else default_volume()
         new_volume = max(0, current_volume - 10)
         await set_volume(player, new_volume)
         await save_player_state(player)
-        await respond(interaction, f"Volume: {new_volume}%")
+        await acknowledge(interaction)
         await self.refresh(interaction)
 
     @discord.ui.button(
@@ -214,13 +197,13 @@ class PlayerControls(discord.ui.View):
     async def volume_up(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
-            await respond(interaction, "Not connected.")
+            await respond(interaction, "Not connected.", ephemeral=True)
             return
         current_volume = player.volume if player.volume is not None else default_volume()
         new_volume = min(200, current_volume + 10)
         await set_volume(player, new_volume)
         await save_player_state(player)
-        await respond(interaction, f"Volume: {new_volume}%")
+        await acknowledge(interaction)
         await self.refresh(interaction)
 
     @discord.ui.button(
@@ -232,7 +215,7 @@ class PlayerControls(discord.ui.View):
     async def mute(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
-            await respond(interaction, "Not connected.")
+            await respond(interaction, "Not connected.", ephemeral=True)
             return
         state = get_guild_state(self.guild_id_for(interaction))
         current_volume = player.volume if player.volume is not None else default_volume()
@@ -240,12 +223,11 @@ class PlayerControls(discord.ui.View):
             state.previous_volume = current_volume
             await set_volume(player, 0)
             await save_player_state(player)
-            await respond(interaction, "Muted.")
         else:
             volume = state.previous_volume or default_volume()
             await set_volume(player, volume)
             await save_player_state(player)
-            await respond(interaction, f"Volume: {volume}%")
+        await acknowledge(interaction)
         await self.refresh(interaction)
 
     @discord.ui.button(
@@ -257,11 +239,11 @@ class PlayerControls(discord.ui.View):
     async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or player.queue.is_empty:
-            await respond(interaction, "Queue is empty.")
+            await respond(interaction, "Queue is empty.", ephemeral=True)
             return
         player.queue.shuffle()
         await save_player_state(player)
-        await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
+        await acknowledge(interaction)
         await self.refresh(interaction)
 
     @discord.ui.button(
@@ -273,14 +255,14 @@ class PlayerControls(discord.ui.View):
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
-            await respond(interaction, "Not connected.")
+            await respond(interaction, "Not connected.", ephemeral=True)
             return
         state = get_guild_state(self.guild_id_for(interaction))
         modes = ["none", "track", "queue"]
         mode = modes[(modes.index(state.loop_mode) + 1) % len(modes)]
         set_loop_mode(player, mode)
         await save_player_state(player)
-        await respond(interaction, f"Loop: {mode}")
+        await acknowledge(interaction)
         await self.refresh(interaction)
 
     @discord.ui.button(

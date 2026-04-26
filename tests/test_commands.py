@@ -15,6 +15,11 @@ def last_response_text(interaction: FakeInteraction) -> str:
     return interaction.followup.sent[-1]["args"][0]
 
 
+def assert_no_text_response(interaction: FakeInteraction) -> None:
+    assert interaction.response.sent == []
+    assert interaction.followup.sent == []
+
+
 async def test_play_rejects_dm() -> None:
     interaction = FakeInteraction(guild=None)
 
@@ -63,9 +68,11 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
     await commands.play_impl(interaction, "daft punk")
 
     assert interaction.response.deferred is True
+    assert interaction.response.defer_kwargs == {"ephemeral": True, "thinking": True}
     assert player.current is track
     assert calls.display == [(guild.id, channel, player)]
-    assert last_response_text(interaction) == "Added: **One More Time**"
+    assert interaction.deleted_original_response is True
+    assert_no_text_response(interaction)
 
 
 async def test_play_reports_connection_failure(monkeypatch) -> None:
@@ -141,7 +148,8 @@ async def test_skip_handles_empty_and_active_player(monkeypatch) -> None:
     await commands.skip_impl(active)
 
     assert player.skip_calls == [True]
-    assert last_response_text(active) == "Skipped."
+    assert active.response.deferred is True
+    assert_no_text_response(active)
 
 
 async def test_pause_resume_volume_shuffle_loop_update_player(monkeypatch) -> None:
@@ -157,26 +165,31 @@ async def test_pause_resume_volume_shuffle_loop_update_player(monkeypatch) -> No
     pause_interaction = FakeInteraction(guild=player.guild)
     await commands.pause_impl(pause_interaction)
     assert player.pause_calls[-1] is True
-    assert last_response_text(pause_interaction) == "Paused."
+    assert pause_interaction.response.deferred is True
+    assert_no_text_response(pause_interaction)
 
     resume_interaction = FakeInteraction(guild=player.guild)
     await commands.resume_impl(resume_interaction)
     assert player.pause_calls[-1] is False
-    assert last_response_text(resume_interaction) == "Resumed."
+    assert resume_interaction.response.deferred is True
+    assert_no_text_response(resume_interaction)
 
     volume_interaction = FakeInteraction(guild=player.guild)
     await commands.volume_impl(volume_interaction, 125)
     assert player.volume_calls[-1] == 125
-    assert last_response_text(volume_interaction) == "Volume: 125%"
+    assert volume_interaction.response.deferred is True
+    assert_no_text_response(volume_interaction)
 
     shuffle_interaction = FakeInteraction(guild=player.guild)
     await commands.shuffle_impl(shuffle_interaction)
     assert player.queue.shuffled is True
-    assert last_response_text(shuffle_interaction) == "Shuffled 1 tracks."
+    assert shuffle_interaction.response.deferred is True
+    assert_no_text_response(shuffle_interaction)
 
     loop_interaction = FakeInteraction(guild=player.guild)
     await commands.loop_impl(loop_interaction, "track")
-    assert last_response_text(loop_interaction) == "Loop: track"
+    assert loop_interaction.response.deferred is True
+    assert_no_text_response(loop_interaction)
     assert len(updates) == 5
 
 
@@ -192,12 +205,14 @@ async def test_volume_impl_clamps_direct_helper_inputs(monkeypatch) -> None:
     high_interaction = FakeInteraction(guild=player.guild)
     await commands.volume_impl(high_interaction, 250)
     assert player.volume_calls[-1] == 200
-    assert last_response_text(high_interaction) == "Volume: 200%"
+    assert high_interaction.response.deferred is True
+    assert_no_text_response(high_interaction)
 
     low_interaction = FakeInteraction(guild=player.guild)
     await commands.volume_impl(low_interaction, -10)
     assert player.volume_calls[-1] == 0
-    assert last_response_text(low_interaction) == "Volume: 0%"
+    assert low_interaction.response.deferred is True
+    assert_no_text_response(low_interaction)
 
 
 async def test_empty_state_commands_respond_ephemerally(monkeypatch) -> None:
@@ -241,13 +256,15 @@ async def test_remove_and_move_queue_items(monkeypatch) -> None:
     await commands.remove_impl(remove_interaction, 2)
 
     assert list(player.queue) == [first, third]
-    assert last_response_text(remove_interaction) == "Removed **Second**."
+    assert remove_interaction.response.deferred is True
+    assert_no_text_response(remove_interaction)
 
     move_interaction = FakeInteraction(guild=player.guild)
     await commands.move_impl(move_interaction, 2, 1)
 
     assert list(player.queue) == [third, first]
-    assert last_response_text(move_interaction) == "Moved **Third** to position 1."
+    assert move_interaction.response.deferred is True
+    assert_no_text_response(move_interaction)
 
 
 async def test_remove_rejects_positions_below_one(monkeypatch) -> None:

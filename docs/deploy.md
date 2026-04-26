@@ -19,7 +19,6 @@ Create `/opt/adacord/.env`:
 ```bash
 DISCORD_TOKEN=your-discord-bot-token
 DISCORD_GUILD_ID=your-server-id
-MESSAGE_DELETE_AFTER=5
 DEFAULT_VOLUME=50
 PLAYER_IDLE_TIMEOUT=30
 VOICE_CONNECT_TIMEOUT=30

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import discord
 import pytest
 
 import adacord.config as config
@@ -287,13 +288,19 @@ class FakeInteraction:
         user=None,
         channel: FakeTextChannel | None = None,
         guild_id: int | None = None,
+        interaction_type: discord.InteractionType | None = discord.InteractionType.application_command,
     ):
         self.guild = guild
         self.guild_id = guild_id if guild_id is not None else (guild.id if guild else None)
         self.user = user if user is not None else FakeMember()
         self.channel = channel or FakeTextChannel()
+        self.type = interaction_type
         self.response = FakeResponse()
         self.followup = FakeFollowup()
+        self.deleted_original_response = False
+
+    async def delete_original_response(self):
+        self.deleted_original_response = True
 
 
 @pytest.fixture(autouse=True)
