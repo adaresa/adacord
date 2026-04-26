@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import discord
 import wavelink
 
+from adacord.persistence import save_player_state
 from adacord.config import default_volume, message_delete_after
 from adacord.player import clear_player, get_player, queue_items, set_loop_mode, set_volume
 from adacord.state import get_guild_state
@@ -114,24 +115,38 @@ def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord
 
 
 class PlayerControls(discord.ui.View):
-    def __init__(self, guild_id: int):
+    def __init__(self, guild_id: int | None = None):
         super().__init__(timeout=None)
         self.guild_id = guild_id
 
+    def guild_id_for(self, interaction: discord.Interaction) -> int:
+        return interaction.guild_id or self.guild_id or 0
+
     async def refresh(self, interaction: discord.Interaction) -> None:
         player = player_for_interaction(interaction)
-        await update_display_for_guild(self.guild_id, player)
+        await update_display_for_guild(self.guild_id_for(interaction), player)
 
-    @discord.ui.button(emoji="\u23ee\ufe0f", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(
+        emoji="\u23ee\ufe0f",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="adacord:player:restart",
+    )
     async def restart(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or not player.current:
             await respond(interaction, "Nothing to restart.")
             return
         await player.seek(0)
+        await save_player_state(player)
         await respond(interaction, "Restarted.")
 
-    @discord.ui.button(emoji="\u23ef\ufe0f", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        emoji="\u23ef\ufe0f",
+        style=discord.ButtonStyle.primary,
+        row=0,
+        custom_id="adacord:player:pause_resume",
+    )
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or not player.current:
@@ -139,10 +154,16 @@ class PlayerControls(discord.ui.View):
             return
         should_pause = not player.paused
         await player.pause(should_pause)
+        await save_player_state(player)
         await respond(interaction, "Paused." if should_pause else "Resumed.")
         await self.refresh(interaction)
 
-    @discord.ui.button(emoji="\u23ed\ufe0f", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(
+        emoji="\u23ed\ufe0f",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="adacord:player:skip",
+    )
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or not player.current:
@@ -151,7 +172,12 @@ class PlayerControls(discord.ui.View):
         await player.skip(force=True)
         await respond(interaction, "Skipped.")
 
-    @discord.ui.button(emoji="\u23f9\ufe0f", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(
+        emoji="\u23f9\ufe0f",
+        style=discord.ButtonStyle.danger,
+        row=0,
+        custom_id="adacord:player:stop",
+    )
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
@@ -161,74 +187,113 @@ class PlayerControls(discord.ui.View):
         await respond(interaction, "Stopped and cleared the queue.")
         await self.refresh(interaction)
 
-    @discord.ui.button(label="-10%", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="-10%",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+        custom_id="adacord:player:volume_down",
+    )
     async def volume_down(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
             await respond(interaction, "Not connected.")
             return
-        new_volume = max(0, player.volume - 10)
+        current_volume = player.volume if player.volume is not None else default_volume()
+        new_volume = max(0, current_volume - 10)
         await set_volume(player, new_volume)
+        await save_player_state(player)
         await respond(interaction, f"Volume: {new_volume}%")
         await self.refresh(interaction)
 
-    @discord.ui.button(label="+10%", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="+10%",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+        custom_id="adacord:player:volume_up",
+    )
     async def volume_up(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
             await respond(interaction, "Not connected.")
             return
-        new_volume = min(200, player.volume + 10)
+        current_volume = player.volume if player.volume is not None else default_volume()
+        new_volume = min(200, current_volume + 10)
         await set_volume(player, new_volume)
+        await save_player_state(player)
         await respond(interaction, f"Volume: {new_volume}%")
         await self.refresh(interaction)
 
-    @discord.ui.button(label="Mute", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="Mute",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+        custom_id="adacord:player:mute",
+    )
     async def mute(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
             await respond(interaction, "Not connected.")
             return
-        state = get_guild_state(self.guild_id)
-        if player.volume > 0:
-            state.previous_volume = player.volume
+        state = get_guild_state(self.guild_id_for(interaction))
+        current_volume = player.volume if player.volume is not None else default_volume()
+        if current_volume > 0:
+            state.previous_volume = current_volume
             await set_volume(player, 0)
+            await save_player_state(player)
             await respond(interaction, "Muted.")
         else:
             volume = state.previous_volume or default_volume()
             await set_volume(player, volume)
+            await save_player_state(player)
             await respond(interaction, f"Volume: {volume}%")
         await self.refresh(interaction)
 
-    @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(
+        label="Shuffle",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+        custom_id="adacord:player:shuffle",
+    )
     async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player or player.queue.is_empty:
             await respond(interaction, "Queue is empty.")
             return
         player.queue.shuffle()
+        await save_player_state(player)
         await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
         await self.refresh(interaction)
 
-    @discord.ui.button(label="Loop", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(
+        label="Loop",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+        custom_id="adacord:player:loop",
+    )
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         if not player:
             await respond(interaction, "Not connected.")
             return
-        state = get_guild_state(self.guild_id)
+        state = get_guild_state(self.guild_id_for(interaction))
         modes = ["none", "track", "queue"]
         mode = modes[(modes.index(state.loop_mode) + 1) % len(modes)]
         set_loop_mode(player, mode)
+        await save_player_state(player)
         await respond(interaction, f"Loop: {mode}")
         await self.refresh(interaction)
 
-    @discord.ui.button(label="Queue", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(
+        label="Queue",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+        custom_id="adacord:player:queue",
+    )
     async def queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = player_for_interaction(interaction)
         await interaction.response.send_message(
             embed=build_queue_embed(player, page=0),
-            view=QueueView(self.guild_id, player),
+            view=QueueView(self.guild_id_for(interaction), player),
             ephemeral=True,
         )
 
@@ -304,6 +369,8 @@ async def create_or_update_display(
         if state.display_message:
             try:
                 await state.display_message.edit(embed=embed, view=view)
+                state.display_channel_id = getattr(state.display_channel, "id", None)
+                state.display_message_id = getattr(state.display_message, "id", None)
                 return state.display_message
             except (discord.NotFound, discord.HTTPException):
                 state.display_message = None
@@ -311,6 +378,8 @@ async def create_or_update_display(
         message = await channel.send(embed=embed, view=view)
         state.display_message = message
         state.display_channel = channel
+        state.display_channel_id = getattr(channel, "id", None)
+        state.display_message_id = getattr(message, "id", None)
         return message
     except Exception:
         logger.exception("Failed to create or update music display")
@@ -332,3 +401,5 @@ async def update_display_for_guild(
             pass
         state.display_message = None
         state.display_channel = None
+        state.display_channel_id = None
+        state.display_message_id = None

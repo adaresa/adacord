@@ -20,6 +20,25 @@ def test_build_player_embed_for_idle_state() -> None:
     assert embed_field(embed, "Queue").value == "Empty"
 
 
+def test_player_controls_are_persistent() -> None:
+    view = ui.PlayerControls()
+
+    assert view.timeout is None
+    assert view.is_persistent()
+    assert {item.custom_id for item in view.children} == {
+        "adacord:player:restart",
+        "adacord:player:pause_resume",
+        "adacord:player:skip",
+        "adacord:player:stop",
+        "adacord:player:volume_down",
+        "adacord:player:volume_up",
+        "adacord:player:mute",
+        "adacord:player:shuffle",
+        "adacord:player:loop",
+        "adacord:player:queue",
+    }
+
+
 def test_build_player_embed_for_paused_looping_queue() -> None:
     current = FakeTrack("Current", length=65_000)
     current.extras = {"requester": "ada", "display_title": "Custom Current"}

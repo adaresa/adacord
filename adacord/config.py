@@ -3,6 +3,32 @@ import os
 DEFAULT_VOLUME = 50
 
 
+def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw_value)
+    except ValueError:
+        value = default
+
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        value = float(raw_value)
+    except ValueError:
+        value = default
+
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
 def discord_token() -> str | None:
     return os.getenv("DISCORD_TOKEN")
 
@@ -16,19 +42,11 @@ def log_level() -> str:
 
 
 def message_delete_after() -> float:
-    raw_value = os.getenv("MESSAGE_DELETE_AFTER", "5").strip()
-    try:
-        return max(0.0, float(raw_value))
-    except ValueError:
-        return 5.0
+    return env_float("MESSAGE_DELETE_AFTER", 5.0, minimum=0.0)
 
 
 def default_volume() -> int:
-    raw_value = os.getenv("DEFAULT_VOLUME", str(DEFAULT_VOLUME)).strip()
-    try:
-        return max(0, min(200, int(raw_value)))
-    except ValueError:
-        return DEFAULT_VOLUME
+    return env_int("DEFAULT_VOLUME", DEFAULT_VOLUME, minimum=0, maximum=200)
 
 
 def lavalink_uri() -> str:
@@ -40,28 +58,28 @@ def lavalink_password() -> str:
 
 
 def lavalink_connect_retries() -> int:
-    return int(os.getenv("LAVALINK_CONNECT_RETRIES", "30"))
+    return env_int("LAVALINK_CONNECT_RETRIES", 30, minimum=1)
 
 
 def lavalink_connect_delay() -> float:
-    return float(os.getenv("LAVALINK_CONNECT_DELAY", "2"))
+    return env_float("LAVALINK_CONNECT_DELAY", 2.0, minimum=0.0)
 
 
 def lavalink_voice_ready_timeout() -> float:
-    return float(os.getenv("LAVALINK_VOICE_READY_TIMEOUT", "10"))
+    return env_float("LAVALINK_VOICE_READY_TIMEOUT", 10.0, minimum=0.0)
 
 
 def lavalink_voice_ready_interval() -> float:
-    return float(os.getenv("LAVALINK_VOICE_READY_INTERVAL", "0.25"))
+    return env_float("LAVALINK_VOICE_READY_INTERVAL", 0.25, minimum=0.01)
 
 
 def player_idle_timeout() -> int:
-    return int(os.getenv("PLAYER_IDLE_TIMEOUT", "30"))
+    return env_int("PLAYER_IDLE_TIMEOUT", 30, minimum=0)
 
 
 def voice_connect_timeout() -> float:
-    raw_value = os.getenv("VOICE_CONNECT_TIMEOUT", "30").strip()
-    try:
-        return max(0.0, float(raw_value))
-    except ValueError:
-        return 30.0
+    return env_float("VOICE_CONNECT_TIMEOUT", 30.0, minimum=0.0)
+
+
+def playback_state_file() -> str:
+    return os.getenv("PLAYBACK_STATE_FILE", "data/playback_state.json")

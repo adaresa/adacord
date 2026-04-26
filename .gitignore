@@ -10,6 +10,7 @@ __pycache__/
 !.env.example
 bot.log
 AGENTS.md
+data/
 
 # Docker
 *.db

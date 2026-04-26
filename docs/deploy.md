@@ -25,6 +25,8 @@ DEFAULT_VOLUME=50
 LAVALINK_PASSWORD=choose-a-password
 LAVALINK_URI=http://lavalink:2333
 PLAYER_IDLE_TIMEOUT=30
+VOICE_CONNECT_TIMEOUT=30
+PLAYBACK_STATE_FILE=/app/data/playback_state.json
 ```
 
 If YouTube playback fails on the VPS with `This video requires login`, add OAuth settings to the same `.env` file using a burner Google/YouTube account:
@@ -128,6 +130,8 @@ docker image prune -f
 ```
 
 The `.env` file is untracked, so it remains on the server across deploys.
+The Compose stack also mounts `./data` into the bot container for playback recovery state, so bot restarts can rebuild
+the active queue and player display.
 
 ## Branch Flow
 
@@ -163,8 +167,8 @@ docker compose logs -f bot lavalink yt-cipher
 If you only need static validation, run the checks without starting a Discord session:
 
 ```bash
-python -m py_compile bot.py audio.py commands.py source_utils.py test_extractor.py
-python test_extractor.py
+python -m py_compile bot.py adacord/*.py tests/*.py
+python -m pytest
 docker compose config --no-interpolate
 ```
 
@@ -173,8 +177,8 @@ docker compose config --no-interpolate
 Pull requests and pushes to `main` run `.github/workflows/ci.yml`:
 
 ```bash
-python -m py_compile bot.py audio.py commands.py source_utils.py test_extractor.py
-python test_extractor.py
+python -m py_compile bot.py adacord/*.py tests/*.py
+python -m pytest
 docker compose config --no-interpolate
 ```
 

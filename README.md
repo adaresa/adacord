@@ -39,13 +39,18 @@ The bot handles Discord commands and queue controls. Lavalink handles track load
 4. Optionally set `MESSAGE_DELETE_AFTER` to control transient bot message cleanup in seconds. Use `0` to keep confirmations.
 5. Optionally set `DEFAULT_VOLUME` from `0` to `200`. The default is `50`.
 6. Optionally set `VOICE_CONNECT_TIMEOUT` if Discord voice joins need longer than the default `30` seconds.
-7. Start everything:
+7. Optionally set `PLAYBACK_STATE_FILE`; Docker defaults to `/app/data/playback_state.json`.
+8. Start everything:
 
 ```bash
 docker compose up -d --build
 ```
 
 The bot connects to Lavalink at `http://lavalink:2333` inside Docker.
+
+Playback session state is stored under `./data` when using Docker Compose. This lets the bot rebuild the active queue,
+player display, volume, and loop mode after a bot container restart. The current track may restart near its last saved
+position rather than continuing perfectly sample-for-sample.
 
 ## Remote Deployment
 

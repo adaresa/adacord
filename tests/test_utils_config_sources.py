@@ -6,7 +6,24 @@ from types import SimpleNamespace
 import pytest
 import wavelink
 
-from adacord.config import default_volume, message_delete_after, voice_connect_timeout
+from adacord.config import (
+    default_volume,
+    lavalink_connect_delay,
+    lavalink_connect_retries,
+    lavalink_voice_ready_interval,
+    lavalink_voice_ready_timeout,
+    message_delete_after,
+    playback_state_file,
+    player_idle_timeout,
+    voice_connect_timeout,
+)
+from adacord.persistence import (
+    clear_guild_state_now as clear_saved_guild_state,
+    load_state,
+    save_player_state_now as save_player_state,
+    track_from_payload,
+    track_payload,
+)
 from adacord.sources import (
     LoadSummary,
     choose_best_song_candidate,
@@ -22,6 +39,7 @@ from adacord.utils import (
     track_display_title,
     track_requester,
 )
+from conftest import FakePlayer, FakeQueue, FakeTrack
 
 
 def test_url_detection() -> None:
@@ -93,6 +111,11 @@ def test_track_extras_support_dict_and_attribute_access(fake_track_factory) -> N
         ("MESSAGE_DELETE_AFTER", [(None, 5), ("not-a-number", 5), ("0", 0), ("-10", 0), ("2.5", 2.5)]),
         ("DEFAULT_VOLUME", [(None, 50), ("not-a-number", 50), ("300", 200), ("-10", 0), ("75", 75)]),
         ("VOICE_CONNECT_TIMEOUT", [(None, 30), ("not-a-number", 30), ("-10", 0), ("45.5", 45.5)]),
+        ("LAVALINK_CONNECT_RETRIES", [(None, 30), ("not-a-number", 30), ("0", 1), ("5", 5)]),
+        ("LAVALINK_CONNECT_DELAY", [(None, 2), ("not-a-number", 2), ("-1", 0), ("0.5", 0.5)]),
+        ("LAVALINK_VOICE_READY_TIMEOUT", [(None, 10), ("not-a-number", 10), ("-1", 0), ("12.5", 12.5)]),
+        ("LAVALINK_VOICE_READY_INTERVAL", [(None, 0.25), ("not-a-number", 0.25), ("0", 0.01), ("1.5", 1.5)]),
+        ("PLAYER_IDLE_TIMEOUT", [(None, 30), ("not-a-number", 30), ("-10", 0), ("45", 45)]),
     ],
 )
 def test_env_defaults_and_clamping(monkeypatch, env_name: str, values) -> None:
@@ -100,6 +123,11 @@ def test_env_defaults_and_clamping(monkeypatch, env_name: str, values) -> None:
         "MESSAGE_DELETE_AFTER": message_delete_after,
         "DEFAULT_VOLUME": default_volume,
         "VOICE_CONNECT_TIMEOUT": voice_connect_timeout,
+        "LAVALINK_CONNECT_RETRIES": lavalink_connect_retries,
+        "LAVALINK_CONNECT_DELAY": lavalink_connect_delay,
+        "LAVALINK_VOICE_READY_TIMEOUT": lavalink_voice_ready_timeout,
+        "LAVALINK_VOICE_READY_INTERVAL": lavalink_voice_ready_interval,
+        "PLAYER_IDLE_TIMEOUT": player_idle_timeout,
     }
     for raw_value, expected in values:
         if raw_value is None:
@@ -107,6 +135,40 @@ def test_env_defaults_and_clamping(monkeypatch, env_name: str, values) -> None:
         else:
             monkeypatch.setenv(env_name, raw_value)
         assert readers[env_name]() == expected
+
+
+def test_playback_state_file_default_and_override(monkeypatch) -> None:
+    monkeypatch.delenv("PLAYBACK_STATE_FILE", raising=False)
+    assert playback_state_file() == "data/playback_state.json"
+
+    monkeypatch.setenv("PLAYBACK_STATE_FILE", "custom/state.json")
+    assert playback_state_file() == "custom/state.json"
+
+
+def test_track_payload_round_trips_to_playable() -> None:
+    track = FakeTrack("Round Trip", author="Tester")
+    track.extras = {"requester": "ada", "display_title": "Custom title"}
+
+    restored = track_from_payload(track_payload(track))
+
+    assert restored is not None
+    assert restored.title == "Round Trip"
+    assert restored.author == "Tester"
+    assert dict(restored.extras) == {"requester": "ada", "display_title": "Custom title"}
+
+
+def test_save_and_clear_player_state() -> None:
+    player = FakePlayer(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Next")]))
+
+    save_player_state(player)
+    data = load_state()
+
+    saved = data["guilds"][str(player.guild.id)]
+    assert saved["current"]["title"] == "Current"
+    assert saved["queue"][0]["title"] == "Next"
+
+    clear_saved_guild_state(player.guild.id)
+    assert load_state()["guilds"] == {}
 
 
 async def test_url_search_keeps_first_result(monkeypatch, fake_track_factory) -> None:
