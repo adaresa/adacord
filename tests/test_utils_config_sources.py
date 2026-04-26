@@ -230,14 +230,10 @@ async def test_load_tracks_uses_public_spotify_metadata(monkeypatch, fake_track_
 
 
 async def test_load_tracks_raises_when_spotify_sources_fail(monkeypatch) -> None:
-    async def fake_playlist_queries(playlist_id: str):
+    async def fake_public(playlist_id: str, requester: str):
         raise RuntimeError("no metadata")
 
-    async def fake_search(query: str, *, source=None):
-        return []
-
-    monkeypatch.setattr("adacord.sources.spotify_playlist_queries", fake_playlist_queries)
-    monkeypatch.setattr(wavelink.Playable, "search", staticmethod(fake_search))
+    monkeypatch.setattr("adacord.sources.load_spotify_with_public_metadata", fake_public)
 
     with pytest.raises(RuntimeError, match="Could not load that Spotify playlist"):
         await load_tracks("https://open.spotify.com/playlist/abc123", "tester")
