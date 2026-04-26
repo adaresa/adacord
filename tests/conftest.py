@@ -133,6 +133,7 @@ class FakePlayer:
         self.inactive_timeout = None
         self.inactive_channel_tokens = None
         self.play_calls: list[tuple[FakeTrack, int | None]] = []
+        self.play_kwargs = []
         self.pause_calls: list[bool] = []
         self.skip_calls: list[bool] = []
         self.volume_calls: list[int] = []
@@ -150,6 +151,7 @@ class FakePlayer:
         self.paused = bool(kwargs.get("paused", False))
         self.volume = volume
         self.play_calls.append((track, volume))
+        self.play_kwargs.append(kwargs)
 
     async def pause(self, value: bool) -> None:
         self.paused = value
@@ -233,6 +235,11 @@ class FakeTextChannel:
     async def send(self, content: str | None = None, **kwargs):
         message = FakeMessage(content, embed=kwargs.get("embed"), view=kwargs.get("view"))
         self.sent.append(message)
+        return message
+
+    async def fetch_message(self, message_id: int):
+        message = FakeMessage()
+        message.id = message_id
         return message
 
 

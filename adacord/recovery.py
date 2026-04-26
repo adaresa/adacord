@@ -22,8 +22,14 @@ async def fetch_channel(bot: commands.Bot, channel_id: int) -> discord.abc.Guild
 
     try:
         fetched = await bot.fetch_channel(channel_id)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-        logger.exception("Could not fetch saved channel %s", channel_id)
+    except discord.NotFound:
+        logger.info("Saved channel %s no longer exists", channel_id)
+        return None
+    except discord.Forbidden:
+        logger.warning("Missing permissions to fetch saved channel %s", channel_id)
+        return None
+    except discord.HTTPException:
+        logger.warning("HTTP error while fetching saved channel %s", channel_id)
         return None
 
     return fetched if isinstance(fetched, discord.abc.GuildChannel) else None
@@ -46,6 +52,8 @@ async def fetch_display_message(
 def restored_tracks(saved: list[dict[str, Any]]) -> list[wavelink.Playable]:
     tracks = []
     for item in saved:
+        if not isinstance(item, dict):
+            continue
         track = track_from_payload(item)
         if track:
             tracks.append(track)
@@ -137,5 +145,5 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
         )
 
     await update_display_for_guild(guild_id, player)
-    save_player_state(player)
+    await save_player_state(player)
     logger.info("Restored playback state for guild %s", guild_id)

@@ -171,7 +171,7 @@ async def clear_player(player: wavelink.Player) -> None:
     set_loop_mode(player, "none")
     player.queue.clear()
     player.queue.history.clear()
-    clear_saved_guild_state(player.guild.id)
+    await clear_saved_guild_state(player.guild.id)
     if player.playing or player.paused:
         await player.skip(force=True)
 

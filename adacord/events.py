@@ -13,13 +13,13 @@ async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
     if not player.queue.is_empty:
         await play_next(player)
     await update_display_for_guild(player.guild.id, player)
-    save_player_state(player)
+    await save_player_state(player)
 
 
 async def handle_track_start(payload: wavelink.TrackStartEventPayload) -> None:
     if payload.player:
         await update_display_for_guild(payload.player.guild.id, payload.player)
-        save_player_state(payload.player)
+        await save_player_state(payload.player)
 
 
 async def handle_inactive_player(player: wavelink.Player) -> None:
@@ -27,5 +27,5 @@ async def handle_inactive_player(player: wavelink.Player) -> None:
     if state.display_channel:
         await send_transient(state.display_channel, "Disconnected after being idle.")
     await update_display_for_guild(player.guild.id, player)
-    clear_saved_guild_state(player.guild.id)
+    await clear_saved_guild_state(player.guild.id)
 

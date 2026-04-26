@@ -18,9 +18,9 @@ from adacord.config import (
     voice_connect_timeout,
 )
 from adacord.persistence import (
-    clear_guild_state as clear_saved_guild_state,
+    clear_guild_state_now as clear_saved_guild_state,
     load_state,
-    save_player_state,
+    save_player_state_now as save_player_state,
     track_from_payload,
     track_payload,
 )

@@ -138,6 +138,7 @@ class PlayerControls(discord.ui.View):
             await respond(interaction, "Nothing to restart.")
             return
         await player.seek(0)
+        await save_player_state(player)
         await respond(interaction, "Restarted.")
 
     @discord.ui.button(
@@ -153,7 +154,7 @@ class PlayerControls(discord.ui.View):
             return
         should_pause = not player.paused
         await player.pause(should_pause)
-        save_player_state(player)
+        await save_player_state(player)
         await respond(interaction, "Paused." if should_pause else "Resumed.")
         await self.refresh(interaction)
 
@@ -200,7 +201,7 @@ class PlayerControls(discord.ui.View):
         current_volume = player.volume if player.volume is not None else default_volume()
         new_volume = max(0, current_volume - 10)
         await set_volume(player, new_volume)
-        save_player_state(player)
+        await save_player_state(player)
         await respond(interaction, f"Volume: {new_volume}%")
         await self.refresh(interaction)
 
@@ -218,7 +219,7 @@ class PlayerControls(discord.ui.View):
         current_volume = player.volume if player.volume is not None else default_volume()
         new_volume = min(200, current_volume + 10)
         await set_volume(player, new_volume)
-        save_player_state(player)
+        await save_player_state(player)
         await respond(interaction, f"Volume: {new_volume}%")
         await self.refresh(interaction)
 
@@ -238,12 +239,12 @@ class PlayerControls(discord.ui.View):
         if current_volume > 0:
             state.previous_volume = current_volume
             await set_volume(player, 0)
-            save_player_state(player)
+            await save_player_state(player)
             await respond(interaction, "Muted.")
         else:
             volume = state.previous_volume or default_volume()
             await set_volume(player, volume)
-            save_player_state(player)
+            await save_player_state(player)
             await respond(interaction, f"Volume: {volume}%")
         await self.refresh(interaction)
 
@@ -259,7 +260,7 @@ class PlayerControls(discord.ui.View):
             await respond(interaction, "Queue is empty.")
             return
         player.queue.shuffle()
-        save_player_state(player)
+        await save_player_state(player)
         await respond(interaction, f"Shuffled {len(player.queue)} tracks.")
         await self.refresh(interaction)
 
@@ -278,7 +279,7 @@ class PlayerControls(discord.ui.View):
         modes = ["none", "track", "queue"]
         mode = modes[(modes.index(state.loop_mode) + 1) % len(modes)]
         set_loop_mode(player, mode)
-        save_player_state(player)
+        await save_player_state(player)
         await respond(interaction, f"Loop: {mode}")
         await self.refresh(interaction)
 
