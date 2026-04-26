@@ -23,7 +23,7 @@ plugins:
       skipInitialization: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:true}
     remoteCipher:
       url: "http://yt-cipher:8001"
-      password: "${YOUTUBE_CIPHER_PASSWORD:adacord-cipher}"
+      password: "adacord-internal-cipher"
       userAgent: "adacord"
   lavasrc:
     providers:

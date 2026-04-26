@@ -35,7 +35,6 @@ If YouTube playback fails on the VPS with `This video requires login`, add OAuth
 YOUTUBE_OAUTH_ENABLED=true
 YOUTUBE_OAUTH_REFRESH_TOKEN=your-refresh-token
 YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
-YOUTUBE_CIPHER_PASSWORD=choose-a-cipher-password
 ```
 
 Start the stack once:
@@ -102,13 +101,7 @@ Use a burner account, not your primary Google account. The youtube-source docs w
 
 ## YouTube Remote Cipher
 
-The Compose stack includes a private `yt-cipher` service for YouTube signature deciphering. This is used by Lavalink through the internal Docker network only; do not publish port `8001` publicly.
-
-Set the same password in `/opt/adacord/.env`:
-
-```bash
-YOUTUBE_CIPHER_PASSWORD=choose-a-cipher-password
-```
+The Compose stack includes a private `yt-cipher` service for YouTube signature deciphering. This is used by Lavalink through the internal Docker network only; do not publish port `8001` publicly. Lavalink and `yt-cipher` share an internal Compose token, so no `.env` setting is required for this service.
 
 If Lavalink logs `Must find sig function`, confirm the cipher service is running:
 
