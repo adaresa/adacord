@@ -1,13 +1,27 @@
 # Adacord
 
-Adacord is a self-hosted Discord music bot packaged for Docker Compose. It plays YouTube links/searches and Spotify playlist metadata through Lavalink, with queue controls and a persistent Discord player panel.
+Adacord is a self-hosted Discord music bot built around a persistent player panel. Instead of flooding your server with playback messages, Adacord keeps one Discord message updated with the current track, queue preview, volume, loop mode, and clickable controls.
+
+It is packaged for Docker Compose and runs with Lavalink, YouTube search/playback, Spotify playlist metadata resolution, queue management, and full core playback controls without relying on a hosted bot or premium paywall.
+
+## Why Adacord?
+
+Most Discord music bots are either hosted services with feature limits or command-heavy bots that clutter the music channel. Adacord is designed for small private servers that want a clean, self-hosted music experience:
+
+- One persistent player panel that updates in place
+- Clickable controls for playback, queue, loop, shuffle, mute, and volume
+- Short-lived command responses so the music channel stays clean
+- Docker-first setup for VPS or home-server installs
+- Local playback state under `./data` so sessions can recover across restarts
+- No hosted-bot dependency, premium tier, or external dashboard required
 
 ## Features
 
+- Persistent Discord player panel with clickable controls
 - YouTube URL and search playback
 - Spotify playlist links resolved through public metadata and YouTube Music search
 - Queue, skip, pause, resume, clear, shuffle, remove, move, loop, volume, and disconnect commands
-- Persistent player controls in Discord
+- Playback session state stored locally under `./data`
 - Docker Compose stack with bot, Lavalink, and YouTube cipher services
 
 ## Quick Start
