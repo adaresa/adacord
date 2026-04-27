@@ -195,19 +195,28 @@ async def test_clear_guild_recommendation_cache_only_removes_that_guild(monkeypa
 def test_prune_recommendation_cache_removes_expired_and_bounds_per_guild() -> None:
     now = time.monotonic()
     for index in range(recommendations.MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD + 5):
-        recommendations.recommendation_cache[(123, f"fresh-{index}")] = recommendations.RecommendationCacheEntry(
+        key = (123, f"fresh-{index}")
+        recommendations.recommendation_cache[key] = recommendations.RecommendationCacheEntry(
             now + 60,
             (),
         )
-    recommendations.recommendation_cache[(123, "expired")] = recommendations.RecommendationCacheEntry(now - 1, ())
-    recommendations.recommendation_cache[(999, "other")] = recommendations.RecommendationCacheEntry(now + 60, ())
+        recommendations.recommendation_load_locks[key] = asyncio.Lock()
+    expired_key = (123, "expired")
+    recommendations.recommendation_cache[expired_key] = recommendations.RecommendationCacheEntry(now - 1, ())
+    recommendations.recommendation_load_locks[expired_key] = asyncio.Lock()
+    other_key = (999, "other")
+    recommendations.recommendation_cache[other_key] = recommendations.RecommendationCacheEntry(now + 60, ())
+    recommendations.recommendation_load_locks[other_key] = asyncio.Lock()
 
     recommendations.prune_recommendation_cache(now, 123)
 
     guild_keys = [key for key in recommendations.recommendation_cache if key[0] == 123]
     assert len(guild_keys) == recommendations.MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD
-    assert (123, "expired") not in recommendations.recommendation_cache
-    assert (999, "other") in recommendations.recommendation_cache
+    assert expired_key not in recommendations.recommendation_cache
+    assert expired_key not in recommendations.recommendation_load_locks
+    assert other_key in recommendations.recommendation_cache
+    assert other_key in recommendations.recommendation_load_locks
+    assert set(recommendations.recommendation_load_locks) == set(recommendations.recommendation_cache)
 
 
 async def test_recommendations_refresh_after_cache_expiry(monkeypatch) -> None:

@@ -367,6 +367,7 @@ def prune_recommendation_cache(now: float | None = None, guild_id: int | None = 
             continue
         if entry.expires_at <= now:
             del recommendation_cache[key]
+            recommendation_load_locks.pop(key, None)
 
     guild_ids = {guild_id} if guild_id is not None else {key[0] for key in recommendation_cache}
     for current_guild_id in guild_ids:
@@ -374,6 +375,7 @@ def prune_recommendation_cache(now: float | None = None, guild_id: int | None = 
         overflow = len(keys) - MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD
         for key in keys[: max(0, overflow)]:
             del recommendation_cache[key]
+            recommendation_load_locks.pop(key, None)
 
 
 async def load_recommendation_candidates(player: wavelink.Player) -> list[wavelink.Playable]:
@@ -424,22 +426,22 @@ async def recommendations_for_player(
     if not allow_refresh:
         return ()
 
-    lock = recommendation_load_locks.setdefault(key, asyncio.Lock())
-    try:
-        async with lock:
-            now = time.monotonic()
-            cached = recommendation_cache.get(key)
-            if cached and cached.expires_at > now:
-                return cached.suggestions
+    lock = recommendation_load_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        recommendation_load_locks[key] = lock
 
-            candidates = await load_recommendation_candidates(player)
-            suggestions = rank_recommendations(candidates, player, RECOMMENDATION_COUNT)
-            recommendation_cache[key] = RecommendationCacheEntry(now + RECOMMENDATION_CACHE_TTL, suggestions)
-            prune_recommendation_cache(now, player.guild.id)
-            return suggestions
-    finally:
-        if not lock.locked():
-            recommendation_load_locks.pop(key, None)
+    async with lock:
+        now = time.monotonic()
+        cached = recommendation_cache.get(key)
+        if cached and cached.expires_at > now:
+            return cached.suggestions
+
+        candidates = await load_recommendation_candidates(player)
+        suggestions = rank_recommendations(candidates, player, RECOMMENDATION_COUNT)
+        recommendation_cache[key] = RecommendationCacheEntry(now + RECOMMENDATION_CACHE_TTL, suggestions)
+        prune_recommendation_cache(now, player.guild.id)
+        return suggestions
 
 
 def clear_recommendation_cache() -> None:
