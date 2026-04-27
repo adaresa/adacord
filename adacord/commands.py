@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import discord
@@ -6,10 +7,12 @@ from discord.ext import commands
 
 from adacord.persistence import save_player_state
 from adacord.player import (
+    MissingVoicePermissions,
     add_tracks,
     disconnect_player,
     ensure_player,
     queue_items,
+    validate_voice_channel_permissions,
 )
 from adacord.sources import load_tracks
 from adacord.state import get_guild_state
@@ -22,6 +25,13 @@ from adacord.ui import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def refresh_display_with_recommendations(guild_id: int, player) -> None:
+    try:
+        await update_display_for_guild(guild_id, player)
+    except Exception:
+        logger.exception("Failed to refresh player display with recommendations")
 
 
 def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
@@ -41,9 +51,18 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await respond(interaction, "Join a voice channel first.", ephemeral=True)
         return
 
+    try:
+        validate_voice_channel_permissions(interaction.guild, channel)
+    except MissingVoicePermissions as exc:
+        await respond(interaction, str(exc), ephemeral=True)
+        return
+
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
         player = await ensure_player(interaction.guild, channel)
+    except MissingVoicePermissions as exc:
+        await respond(interaction, str(exc), ephemeral=True)
+        return
     except Exception as exc:
         logger.exception("Failed to connect Lavalink player to voice")
         await respond(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
@@ -72,12 +91,13 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         return
 
     if was_idle and interaction.channel:
-        await create_or_update_display(interaction.guild.id, interaction.channel, player)
+        await create_or_update_display(interaction.guild.id, interaction.channel, player, manage_refresh=False)
     else:
-        await update_display_for_guild(interaction.guild.id, player)
+        await update_display_for_guild(interaction.guild.id, player, manage_refresh=False)
     await save_player_state(player)
 
     await acknowledge(interaction)
+    asyncio.create_task(refresh_display_with_recommendations(interaction.guild.id, player))
 
 
 async def disconnect_impl(interaction: discord.Interaction) -> None:

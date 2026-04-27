@@ -8,7 +8,7 @@ from discord.ext import commands
 import wavelink
 
 from adacord.persistence import load_state, save_player_state, track_from_payload
-from adacord.player import ensure_player, set_loop_mode
+from adacord.player import MissingVoicePermissions, ensure_player, set_loop_mode
 from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
 
@@ -121,7 +121,13 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
         await update_display_for_guild(guild_id, None)
         return
 
-    player = await ensure_player(guild, voice_channel)
+    try:
+        player = await ensure_player(guild, voice_channel)
+    except MissingVoicePermissions as exc:
+        logger.warning("Skipping playback restore for guild %s: %s", guild_id, exc)
+        await update_display_for_guild(guild_id, None)
+        return
+
     volume = saved.get("volume")
     if isinstance(volume, int):
         await player.set_volume(max(0, min(200, volume)))

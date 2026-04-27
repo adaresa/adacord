@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from adacord import recovery
 from adacord.state import get_guild_state
 from conftest import FakeGuild, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack, FakeVoiceChannel
@@ -112,6 +114,35 @@ async def test_restore_guild_playback_state_handles_empty_saved_queue(monkeypatc
 
     await recovery.restore_guild_playback_state(FakeBot(guild), guild.id, {"voice_channel_id": voice_channel.id})
 
+    assert updates == [(guild.id, None)]
+
+
+async def test_restore_guild_playback_state_skips_missing_voice_permissions(monkeypatch) -> None:
+    guild = FakeGuild()
+    voice_channel = FakeVoiceChannel(
+        guild=guild,
+        permissions=SimpleNamespace(view_channel=True, connect=False, speak=True),
+    )
+    updates = []
+
+    async def fake_fetch_channel(bot, channel_id):
+        return voice_channel
+
+    async def fake_update(guild_id, player):
+        updates.append((guild_id, player))
+
+    monkeypatch.setattr(recovery, "fetch_channel", fake_fetch_channel)
+    monkeypatch.setattr(recovery, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(recovery.discord, "VoiceChannel", FakeVoiceChannel)
+    monkeypatch.setattr(recovery.discord, "StageChannel", type("FakeStageChannel", (), {}))
+
+    await recovery.restore_guild_playback_state(
+        FakeBot(guild),
+        guild.id,
+        {"voice_channel_id": voice_channel.id, "current": saved_track(FakeTrack("Current")), "queue": []},
+    )
+
+    assert voice_channel.connect_kwargs is None
     assert updates == [(guild.id, None)]
 
 

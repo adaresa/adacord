@@ -6,7 +6,16 @@ import pytest
 
 from adacord import commands
 from adacord.sources import LoadSummary
-from conftest import FakeGuild, FakeInteraction, FakeMember, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack
+from conftest import (
+    FakeGuild,
+    FakeInteraction,
+    FakeMember,
+    FakePlayer,
+    FakeQueue,
+    FakeTextChannel,
+    FakeTrack,
+    FakeVoiceChannel,
+)
 
 
 def last_response_text(interaction: FakeInteraction) -> str:
@@ -45,7 +54,7 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
     voice_channel = object()
     player = FakePlayer(guild=guild, playing=False)
     track = FakeTrack("One More Time")
-    calls = SimpleNamespace(display=[])
+    calls = SimpleNamespace(display=[], background=[])
 
     async def fake_ensure_player(seen_guild, seen_channel):
         assert seen_guild is guild
@@ -57,20 +66,27 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
         assert requester == "ada"
         return [track], LoadSummary("One More Time", 1, "youtube")
 
-    async def fake_create_display(guild_id, seen_channel, seen_player):
-        calls.display.append((guild_id, seen_channel, seen_player))
+    async def fake_create_display(guild_id, seen_channel, seen_player, *, manage_refresh=True):
+        calls.display.append((guild_id, seen_channel, seen_player, manage_refresh))
+
+    def fake_create_task(coro):
+        calls.background.append(coro)
+        coro.close()
+        return None
 
     monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
     monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
     monkeypatch.setattr(commands, "load_tracks", fake_load_tracks)
     monkeypatch.setattr(commands, "create_or_update_display", fake_create_display)
+    monkeypatch.setattr(commands.asyncio, "create_task", fake_create_task)
 
     await commands.play_impl(interaction, "daft punk")
 
     assert interaction.response.deferred is True
     assert interaction.response.defer_kwargs == {"ephemeral": True, "thinking": True}
     assert player.current is track
-    assert calls.display == [(guild.id, channel, player)]
+    assert calls.display == [(guild.id, channel, player, False)]
+    assert len(calls.background) == 1
     assert interaction.deleted_original_response is True
     assert_no_text_response(interaction)
 
@@ -88,6 +104,25 @@ async def test_play_reports_connection_failure(monkeypatch) -> None:
 
     assert last_response_text(interaction) == "Could not connect to voice: voice denied"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+
+
+async def test_play_rejects_missing_voice_permissions_before_defer(monkeypatch) -> None:
+    guild = FakeGuild()
+    voice_channel = FakeVoiceChannel(
+        guild=guild,
+        permissions=SimpleNamespace(view_channel=True, connect=False, speak=False),
+        name="kassu bot testing",
+    )
+    interaction = FakeInteraction(guild=guild)
+
+    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
+
+    await commands.play_impl(interaction, "song")
+
+    assert last_response_text(interaction) == "I need Connect and Speak permissions in kassu bot testing."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.response.deferred is False
+    assert voice_channel.connect_kwargs is None
 
 
 async def test_play_reports_load_failure(monkeypatch) -> None:

@@ -21,6 +21,53 @@ from adacord.state import get_guild_state
 logger = logging.getLogger(__name__)
 
 
+VOICE_PERMISSION_LABELS = {
+    "view_channel": "View Channel",
+    "connect": "Connect",
+    "speak": "Speak",
+}
+
+
+class MissingVoicePermissions(RuntimeError):
+    def __init__(self, channel: discord.VoiceChannel | discord.StageChannel, missing: list[str]):
+        self.channel = channel
+        self.missing = missing
+        super().__init__(voice_permission_message(channel, missing))
+
+
+def format_permission_list(permissions: list[str]) -> str:
+    labels = [VOICE_PERMISSION_LABELS.get(permission, permission) for permission in permissions]
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return f"{', '.join(labels[:-1])}, and {labels[-1]}"
+
+
+def voice_permission_message(channel: discord.VoiceChannel | discord.StageChannel, missing: list[str]) -> str:
+    channel_name = getattr(channel, "name", None) or str(channel)
+    permission_word = "permission" if len(missing) == 1 else "permissions"
+    return f"I need {format_permission_list(missing)} {permission_word} in {channel_name}."
+
+
+def validate_voice_channel_permissions(
+    guild: discord.Guild,
+    target_channel: discord.VoiceChannel | discord.StageChannel,
+) -> None:
+    bot_member = getattr(guild, "me", None) or getattr(getattr(target_channel, "guild", None), "me", None)
+    if not bot_member or not hasattr(target_channel, "permissions_for"):
+        return
+
+    permissions = target_channel.permissions_for(bot_member)
+    missing = [
+        permission
+        for permission in ("view_channel", "connect", "speak")
+        if not getattr(permissions, permission, False)
+    ]
+    if missing:
+        raise MissingVoicePermissions(target_channel, missing)
+
+
 async def connect_lavalink(bot: discord.Client) -> None:
     uri = lavalink_uri()
     retries = lavalink_connect_retries()
@@ -66,6 +113,7 @@ async def ensure_player(
     guild: discord.Guild,
     target_channel: discord.VoiceChannel | discord.StageChannel,
 ) -> wavelink.Player:
+    validate_voice_channel_permissions(guild, target_channel)
     state = get_guild_state(guild.id)
     state.voice_channel_id = getattr(target_channel, "id", None)
     async with state.connect_lock:

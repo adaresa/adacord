@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 import wavelink
 
-from adacord.player import add_tracks, clear_player, disconnect_player, play_next, set_loop_mode, set_volume
+from adacord.player import (
+    MissingVoicePermissions,
+    add_tracks,
+    clear_player,
+    disconnect_player,
+    ensure_player,
+    play_next,
+    set_loop_mode,
+    set_volume,
+)
 from adacord.state import get_guild_state
-from conftest import FakePlayer, FakeQueue, FakeTrack
+from conftest import FakeGuild, FakePlayer, FakeQueue, FakeTrack, FakeVoiceChannel
 
 
 async def test_add_tracks_starts_playback_when_idle() -> None:
@@ -57,6 +67,20 @@ async def test_play_next_uses_default_volume_when_player_volume_is_missing() -> 
 
     assert await play_next(player) is track
     assert player.play_calls == [(track, 50)]
+
+
+async def test_ensure_player_rejects_missing_voice_permissions_before_connect() -> None:
+    guild = FakeGuild()
+    channel = FakeVoiceChannel(
+        guild=guild,
+        permissions=SimpleNamespace(view_channel=True, connect=False, speak=True),
+        name="locked voice",
+    )
+
+    with pytest.raises(MissingVoicePermissions, match="Connect"):
+        await ensure_player(guild, channel)
+
+    assert channel.connect_kwargs is None
 
 
 async def test_set_volume_clamps_values() -> None:

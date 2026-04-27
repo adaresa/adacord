@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import asyncio
 
 import pytest
 
@@ -11,8 +12,10 @@ from conftest import FakePlayer, FakeQueue, FakeTrack
 @pytest.fixture(autouse=True)
 def clear_recommendation_cache():
     recommendations.clear_recommendation_cache()
+    recommendations.spotify_seed_disabled_until = 0.0
     yield
     recommendations.clear_recommendation_cache()
+    recommendations.spotify_seed_disabled_until = 0.0
 
 
 def test_recommendation_queries_use_spotify_isrc_and_youtube_fallbacks() -> None:
@@ -99,6 +102,27 @@ async def test_recommendations_cache_by_current_track(monkeypatch) -> None:
     assert first[0].track.title == "Suggestion"
 
 
+async def test_recommendations_share_concurrent_refresh(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+    calls = 0
+
+    async def fake_load(seen_player):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return [FakeTrack("Suggestion", author="Artist")]
+
+    monkeypatch.setattr(recommendations, "load_recommendation_candidates", fake_load)
+
+    first, second = await asyncio.gather(
+        recommendations.recommendations_for_player(player),
+        recommendations.recommendations_for_player(player),
+    )
+
+    assert calls == 1
+    assert first == second
+
+
 async def test_recommendations_skip_load_when_refresh_not_allowed(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"))
 
@@ -171,19 +195,28 @@ async def test_clear_guild_recommendation_cache_only_removes_that_guild(monkeypa
 def test_prune_recommendation_cache_removes_expired_and_bounds_per_guild() -> None:
     now = time.monotonic()
     for index in range(recommendations.MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD + 5):
-        recommendations.recommendation_cache[(123, f"fresh-{index}")] = recommendations.RecommendationCacheEntry(
+        key = (123, f"fresh-{index}")
+        recommendations.recommendation_cache[key] = recommendations.RecommendationCacheEntry(
             now + 60,
             (),
         )
-    recommendations.recommendation_cache[(123, "expired")] = recommendations.RecommendationCacheEntry(now - 1, ())
-    recommendations.recommendation_cache[(999, "other")] = recommendations.RecommendationCacheEntry(now + 60, ())
+        recommendations.recommendation_load_locks[key] = asyncio.Lock()
+    expired_key = (123, "expired")
+    recommendations.recommendation_cache[expired_key] = recommendations.RecommendationCacheEntry(now - 1, ())
+    recommendations.recommendation_load_locks[expired_key] = asyncio.Lock()
+    other_key = (999, "other")
+    recommendations.recommendation_cache[other_key] = recommendations.RecommendationCacheEntry(now + 60, ())
+    recommendations.recommendation_load_locks[other_key] = asyncio.Lock()
 
     recommendations.prune_recommendation_cache(now, 123)
 
     guild_keys = [key for key in recommendations.recommendation_cache if key[0] == 123]
     assert len(guild_keys) == recommendations.MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD
-    assert (123, "expired") not in recommendations.recommendation_cache
-    assert (999, "other") in recommendations.recommendation_cache
+    assert expired_key not in recommendations.recommendation_cache
+    assert expired_key not in recommendations.recommendation_load_locks
+    assert other_key in recommendations.recommendation_cache
+    assert other_key in recommendations.recommendation_load_locks
+    assert set(recommendations.recommendation_load_locks) == set(recommendations.recommendation_cache)
 
 
 async def test_recommendations_refresh_after_cache_expiry(monkeypatch) -> None:
@@ -249,6 +282,29 @@ async def test_load_recommendation_candidates_uses_spotify_seed_recommendations(
     assert "spsearch:MGMT - Kids" in calls
     assert "sprec:mix:track:spotify-kids" in calls
     assert suggestion in candidates
+
+
+async def test_spotify_seed_backoff_stops_after_first_failure(monkeypatch) -> None:
+    player = FakePlayer(
+        current=FakeTrack("First", author="Artist A"),
+        queue=FakeQueue([FakeTrack("Second", author="Artist B"), FakeTrack("Third", author="Artist C")]),
+    )
+    calls = []
+    now = 1000.0
+
+    async def fake_search(query, requester, *, limit=None):
+        calls.append(query)
+        raise RuntimeError("spotify unavailable")
+
+    monkeypatch.setattr(recommendations.time, "monotonic", lambda: now)
+    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
+
+    assert await recommendations.spotify_seed_tracks(player) == []
+    assert calls == ["spsearch:Artist A - First"]
+    assert recommendations.spotify_seed_disabled_until == now + recommendations.SPOTIFY_SEED_BACKOFF_SECONDS
+
+    assert await recommendations.spotify_seed_tracks(player) == []
+    assert calls == ["spsearch:Artist A - First"]
 
 
 async def test_resolve_recommendation_value_uses_lavalink_search(monkeypatch) -> None:

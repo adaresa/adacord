@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ RECOMMENDATION_REQUESTER = "Adacord suggestions"
 RECOMMENDATION_POOL_LIMIT = 25
 MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD = 20
 SPOTIFY_SEED_LIMIT = 4
+SPOTIFY_SEED_BACKOFF_SECONDS = 15 * 60
+spotify_seed_disabled_until = 0.0
 RECOMMENDATION_VARIANT_TERMS = AVOID_TERMS | {
     "acapella",
     "a cappella",
@@ -57,6 +60,7 @@ class RecommendationCacheEntry:
 
 
 recommendation_cache: dict[tuple[int, str], RecommendationCacheEntry] = {}
+recommendation_load_locks: dict[tuple[int, str], asyncio.Lock] = {}
 
 
 def track_title(track: object | None) -> str:
@@ -336,6 +340,12 @@ def rank_recommendations(
 
 
 async def spotify_seed_tracks(player: wavelink.Player) -> list[wavelink.Playable]:
+    global spotify_seed_disabled_until
+
+    now = time.monotonic()
+    if spotify_seed_disabled_until > now:
+        return []
+
     seeds = [player.current, *queue_items(player)[: SPOTIFY_SEED_LIMIT - 1]]
     queries = [track_query_text(track) for track in seeds if track_query_text(track)]
     found: list[wavelink.Playable] = []
@@ -343,7 +353,9 @@ async def spotify_seed_tracks(player: wavelink.Player) -> list[wavelink.Playable
         try:
             found.extend(await search_lavalink(f"spsearch:{query}", RECOMMENDATION_REQUESTER, limit=1))
         except Exception as exc:
+            spotify_seed_disabled_until = time.monotonic() + SPOTIFY_SEED_BACKOFF_SECONDS
             logger.debug("Spotify seed query %r failed: %s", query, exc)
+            break
     return found
 
 
@@ -355,6 +367,7 @@ def prune_recommendation_cache(now: float | None = None, guild_id: int | None = 
             continue
         if entry.expires_at <= now:
             del recommendation_cache[key]
+            recommendation_load_locks.pop(key, None)
 
     guild_ids = {guild_id} if guild_id is not None else {key[0] for key in recommendation_cache}
     for current_guild_id in guild_ids:
@@ -362,6 +375,7 @@ def prune_recommendation_cache(now: float | None = None, guild_id: int | None = 
         overflow = len(keys) - MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD
         for key in keys[: max(0, overflow)]:
             del recommendation_cache[key]
+            recommendation_load_locks.pop(key, None)
 
 
 async def load_recommendation_candidates(player: wavelink.Player) -> list[wavelink.Playable]:
@@ -412,18 +426,33 @@ async def recommendations_for_player(
     if not allow_refresh:
         return ()
 
-    candidates = await load_recommendation_candidates(player)
-    suggestions = rank_recommendations(candidates, player, RECOMMENDATION_COUNT)
-    recommendation_cache[key] = RecommendationCacheEntry(now + RECOMMENDATION_CACHE_TTL, suggestions)
-    prune_recommendation_cache(now, player.guild.id)
-    return suggestions
+    lock = recommendation_load_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        recommendation_load_locks[key] = lock
+
+    async with lock:
+        now = time.monotonic()
+        cached = recommendation_cache.get(key)
+        if cached and cached.expires_at > now:
+            return cached.suggestions
+
+        candidates = await load_recommendation_candidates(player)
+        suggestions = rank_recommendations(candidates, player, RECOMMENDATION_COUNT)
+        recommendation_cache[key] = RecommendationCacheEntry(now + RECOMMENDATION_CACHE_TTL, suggestions)
+        prune_recommendation_cache(now, player.guild.id)
+        return suggestions
 
 
 def clear_recommendation_cache() -> None:
     recommendation_cache.clear()
+    recommendation_load_locks.clear()
 
 
 def clear_guild_recommendation_cache(guild_id: int) -> None:
     for key in list(recommendation_cache):
         if key[0] == guild_id:
             del recommendation_cache[key]
+    for key in list(recommendation_load_locks):
+        if key[0] == guild_id:
+            del recommendation_load_locks[key]
