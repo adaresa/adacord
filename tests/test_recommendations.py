@@ -99,6 +99,37 @@ async def test_recommendations_cache_by_current_track(monkeypatch) -> None:
     assert first[0].track.title == "Suggestion"
 
 
+async def test_recommendations_skip_load_when_refresh_not_allowed(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+
+    async def fail_load(seen_player):
+        raise AssertionError("progress refresh should not load recommendations")
+
+    monkeypatch.setattr(recommendations, "load_recommendation_candidates", fail_load)
+
+    assert await recommendations.recommendations_for_player(player, allow_refresh=False) == ()
+
+
+async def test_recommendations_return_stale_cache_when_refresh_not_allowed(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+    now = time.monotonic()
+
+    async def fake_load(seen_player):
+        return [FakeTrack("Suggestion", author="Artist")]
+
+    monkeypatch.setattr(recommendations.time, "monotonic", lambda: now)
+    monkeypatch.setattr(recommendations, "load_recommendation_candidates", fake_load)
+    first = await recommendations.recommendations_for_player(player)
+
+    async def fail_load(seen_player):
+        raise AssertionError("stale cache should be reused for progress refresh")
+
+    monkeypatch.setattr(recommendations.time, "monotonic", lambda: now + recommendations.RECOMMENDATION_CACHE_TTL + 1)
+    monkeypatch.setattr(recommendations, "load_recommendation_candidates", fail_load)
+
+    assert await recommendations.recommendations_for_player(player, allow_refresh=False) == first
+
+
 async def test_recommendations_cache_refreshes_when_queue_context_changes(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Queued A")]))
     calls = []
@@ -135,6 +166,24 @@ async def test_clear_guild_recommendation_cache_only_removes_that_guild(monkeypa
     recommendations.clear_guild_recommendation_cache(player.guild.id)
 
     assert all(key[0] == other_player.guild.id for key in recommendations.recommendation_cache)
+
+
+def test_prune_recommendation_cache_removes_expired_and_bounds_per_guild() -> None:
+    now = time.monotonic()
+    for index in range(recommendations.MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD + 5):
+        recommendations.recommendation_cache[(123, f"fresh-{index}")] = recommendations.RecommendationCacheEntry(
+            now + 60,
+            (),
+        )
+    recommendations.recommendation_cache[(123, "expired")] = recommendations.RecommendationCacheEntry(now - 1, ())
+    recommendations.recommendation_cache[(999, "other")] = recommendations.RecommendationCacheEntry(now + 60, ())
+
+    recommendations.prune_recommendation_cache(now, 123)
+
+    guild_keys = [key for key in recommendations.recommendation_cache if key[0] == 123]
+    assert len(guild_keys) == recommendations.MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD
+    assert (123, "expired") not in recommendations.recommendation_cache
+    assert (999, "other") in recommendations.recommendation_cache
 
 
 async def test_recommendations_refresh_after_cache_expiry(monkeypatch) -> None:
@@ -200,3 +249,17 @@ async def test_load_recommendation_candidates_uses_spotify_seed_recommendations(
     assert "spsearch:MGMT - Kids" in calls
     assert "sprec:mix:track:spotify-kids" in calls
     assert suggestion in candidates
+
+
+async def test_resolve_recommendation_value_uses_lavalink_search(monkeypatch) -> None:
+    resolved = FakeTrack("Resolved", author="Artist")
+
+    async def fake_search(query, requester, *, limit=None):
+        assert query == resolved.uri
+        assert requester == "tester"
+        assert limit == 1
+        return [resolved]
+
+    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
+
+    assert await recommendations.resolve_recommendation_value(resolved.uri, "tester") is resolved

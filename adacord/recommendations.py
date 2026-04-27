@@ -14,6 +14,7 @@ RECOMMENDATION_CACHE_TTL = 10 * 60
 RECOMMENDATION_COUNT = 10
 RECOMMENDATION_REQUESTER = "Adacord suggestions"
 RECOMMENDATION_POOL_LIMIT = 25
+MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD = 20
 SPOTIFY_SEED_LIMIT = 4
 RECOMMENDATION_VARIANT_TERMS = AVOID_TERMS | {
     "acapella",
@@ -96,6 +97,19 @@ def track_uri(track: object | None) -> str | None:
         if raw_uri:
             return str(raw_uri)
     return None
+
+
+def recommendation_value(track: object) -> str:
+    uri = track_uri(track)
+    if uri and len(uri) <= 100:
+        return uri
+
+    query = track_query_text(track)
+    value = f"ytmsearch:{query}" if query else track_identifier(track)
+    if value and len(value) <= 100:
+        return value
+
+    return format_recommendation_label(track)[:100]
 
 
 def track_isrc(track: object | None) -> str | None:
@@ -208,6 +222,11 @@ def format_recommendation_description(track: wavelink.Playable) -> str | None:
     if source:
         return source[:100]
     return None
+
+
+async def resolve_recommendation_value(value: str, requester: str) -> wavelink.Playable | None:
+    tracks = await search_lavalink(value, requester, limit=1)
+    return tracks[0] if tracks else None
 
 
 def title_signature_words(track: object) -> set[str]:
@@ -328,6 +347,23 @@ async def spotify_seed_tracks(player: wavelink.Player) -> list[wavelink.Playable
     return found
 
 
+def prune_recommendation_cache(now: float | None = None, guild_id: int | None = None) -> None:
+    now = time.monotonic() if now is None else now
+
+    for key, entry in list(recommendation_cache.items()):
+        if guild_id is not None and key[0] != guild_id:
+            continue
+        if entry.expires_at <= now:
+            del recommendation_cache[key]
+
+    guild_ids = {guild_id} if guild_id is not None else {key[0] for key in recommendation_cache}
+    for current_guild_id in guild_ids:
+        keys = [key for key in recommendation_cache if key[0] == current_guild_id]
+        overflow = len(keys) - MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD
+        for key in keys[: max(0, overflow)]:
+            del recommendation_cache[key]
+
+
 async def load_recommendation_candidates(player: wavelink.Player) -> list[wavelink.Playable]:
     candidates: list[wavelink.Playable] = []
     for seed in await spotify_seed_tracks(player):
@@ -353,7 +389,11 @@ async def load_recommendation_candidates(player: wavelink.Player) -> list[waveli
     return candidates
 
 
-async def recommendations_for_player(player: wavelink.Player | None) -> tuple[Recommendation, ...]:
+async def recommendations_for_player(
+    player: wavelink.Player | None,
+    *,
+    allow_refresh: bool = True,
+) -> tuple[Recommendation, ...]:
     if not player or not player.current:
         return ()
 
@@ -363,12 +403,19 @@ async def recommendations_for_player(player: wavelink.Player | None) -> tuple[Re
 
     now = time.monotonic()
     cached = recommendation_cache.get(key)
-    if cached and cached.expires_at > now:
+    if cached and not allow_refresh:
         return cached.suggestions
+    prune_recommendation_cache(now, player.guild.id)
+    cached = recommendation_cache.get(key)
+    if cached and (cached.expires_at > now or not allow_refresh):
+        return cached.suggestions
+    if not allow_refresh:
+        return ()
 
     candidates = await load_recommendation_candidates(player)
     suggestions = rank_recommendations(candidates, player, RECOMMENDATION_COUNT)
     recommendation_cache[key] = RecommendationCacheEntry(now + RECOMMENDATION_CACHE_TTL, suggestions)
+    prune_recommendation_cache(now, player.guild.id)
     return suggestions
 
 

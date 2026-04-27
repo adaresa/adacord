@@ -11,7 +11,14 @@ import wavelink
 from adacord.persistence import save_player_state
 from adacord.config import default_volume
 from adacord.player import add_tracks, clear_player, get_player, queue_items, set_loop_mode, set_volume
-from adacord.recommendations import Recommendation, clear_guild_recommendation_cache, recommendations_for_player
+from adacord.recommendations import (
+    RECOMMENDATION_REQUESTER,
+    Recommendation,
+    clear_guild_recommendation_cache,
+    recommendation_value,
+    recommendations_for_player,
+    resolve_recommendation_value,
+)
 from adacord.state import get_guild_state
 from adacord.utils import format_duration, track_display_title, track_requester
 
@@ -224,10 +231,17 @@ def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord
 
 
 class PlayerPanelView(discord.ui.LayoutView):
-    def __init__(self, guild_id: int | None = None, model: PlayerPanelModel | None = None):
+    def __init__(
+        self,
+        guild_id: int | None = None,
+        model: PlayerPanelModel | None = None,
+        *,
+        register_persistent_controls: bool = False,
+    ):
         super().__init__(timeout=None)
         self.guild_id = guild_id
         self.model = model or build_player_panel_model(None, guild_id)
+        self.register_persistent_controls = register_persistent_controls
         self.build_layout()
 
     def guild_id_for(self, interaction: discord.Interaction) -> int:
@@ -266,23 +280,27 @@ class PlayerPanelView(discord.ui.LayoutView):
         queue_text = "\n".join(self.model.queue_preview) if self.model.queue_preview else "Queue is empty"
         container.add_item(discord.ui.TextDisplay(f"**Up Next**\n{queue_text}"))
 
-        if self.model.suggestions:
+        if self.model.suggestions or self.register_persistent_controls:
             container.add_item(discord.ui.Separator())
             container.add_item(discord.ui.TextDisplay("**Suggested Next**"))
             suggestion_row = discord.ui.ActionRow()
+            options = [
+                discord.SelectOption(
+                    label=suggestion.label,
+                    value=recommendation_value(suggestion.track),
+                    description=suggestion.description,
+                )
+                for suggestion in self.model.suggestions
+            ]
+            if not options:
+                options = [discord.SelectOption(label="No suggestions available", value="none")]
             suggestion_select = discord.ui.Select(
                 custom_id=PLAYER_CONTROL_IDS["suggestions"],
                 placeholder="Choose a song to add",
                 min_values=1,
                 max_values=1,
-                options=[
-                    discord.SelectOption(
-                        label=suggestion.label,
-                        value=str(index),
-                        description=suggestion.description,
-                    )
-                    for index, suggestion in enumerate(self.model.suggestions)
-                ],
+                options=options,
+                disabled=not bool(self.model.suggestions),
             )
             suggestion_select.callback = self.add_suggestion
             suggestion_row.add_item(suggestion_select)
@@ -477,19 +495,28 @@ class PlayerPanelView(discord.ui.LayoutView):
         data = getattr(interaction, "data", None)
         values = data.get("values") if isinstance(data, dict) else getattr(data, "values", None)
         try:
-            index = int(values[0])
-            suggestion = self.model.suggestions[index]
-        except (TypeError, ValueError, IndexError):
+            value = str(values[0])
+        except (TypeError, IndexError):
             await respond(interaction, "That suggestion is no longer available.", ephemeral=True)
             return
 
-        extras = dict(suggestion.track.extras) if isinstance(getattr(suggestion.track, "extras", None), dict) else {}
+        suggestion = next(
+            (suggestion for suggestion in self.model.suggestions if recommendation_value(suggestion.track) == value),
+            None,
+        )
+        track = suggestion.track if suggestion else await resolve_recommendation_value(value, RECOMMENDATION_REQUESTER)
+        if not track:
+            await respond(interaction, "That suggestion is no longer available.", ephemeral=True)
+            return
+
+        await acknowledge(interaction)
+
+        extras = dict(track.extras) if isinstance(getattr(track, "extras", None), dict) else {}
         extras["requester"] = str(interaction.user)
-        suggestion.track.extras = extras
-        await add_tracks(player, [suggestion.track])
+        track.extras = extras
+        await add_tracks(player, [track])
         await save_player_state(player)
         clear_guild_recommendation_cache(player.guild.id)
-        await acknowledge(interaction)
         await self.refresh(interaction)
 
 
@@ -616,7 +643,7 @@ async def create_or_update_display(
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
     try:
-        suggestions = await recommendations_for_player(player)
+        suggestions = await recommendations_for_player(player, allow_refresh=manage_refresh)
     except Exception:
         logger.exception("Failed to load song recommendations")
         suggestions = ()

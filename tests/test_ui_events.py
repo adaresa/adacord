@@ -81,6 +81,15 @@ def test_player_panel_view_is_persistent_v2_with_stable_controls() -> None:
     assert all(component.get("type") != "embed" for component in view.to_components())
 
 
+def test_player_panel_view_can_register_persistent_suggestion_select() -> None:
+    view = ui.PlayerPanelView(register_persistent_controls=True)
+    selects = [item for item in view.walk_children() if isinstance(item, discord.ui.Select)]
+
+    assert "adacord:player:suggestions" in custom_ids(view)
+    assert len(selects) == 1
+    assert selects[0].disabled is True
+
+
 def test_build_player_panel_model_for_paused_looping_queue_with_artwork() -> None:
     current = FakeTrack("Current", length=65_000)
     current.position = 12_000
@@ -139,6 +148,7 @@ def test_player_panel_view_renders_suggestion_dropdown_when_available() -> None:
     assert len(selects) == 1
     assert selects[0].placeholder == "Choose a song to add"
     assert selects[0].options[0].label == "Artist - Fresh Song"
+    assert selects[0].options[0].value == suggestion.uri
 
 
 def test_build_queue_embed_paginates_tracks() -> None:
@@ -250,6 +260,27 @@ async def test_display_refresh_loop_edits_progress_without_rescheduling(monkeypa
     assert calls == [(player.guild.id, state.display_channel, player, False)]
 
 
+async def test_progress_refresh_does_not_refresh_recommendations(monkeypatch) -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    state = get_guild_state(player.guild.id)
+    state.display_message = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    state.display_channel = channel
+    calls = []
+
+    async def fake_recommendations(seen_player, *, allow_refresh=True):
+        calls.append((seen_player, allow_refresh))
+        return ()
+
+    monkeypatch.setattr(ui, "recommendations_for_player", fake_recommendations)
+
+    await ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False)
+
+    assert calls == [(player, False)]
+
+
 async def test_player_panel_controls_update_player_silently(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"), playing=True, queue=FakeQueue([FakeTrack("Next")]), volume=50)
     updates = []
@@ -320,7 +351,7 @@ async def test_player_panel_suggestion_select_queues_track_and_refreshes(monkeyp
     )
     view = ui.PlayerPanelView(player.guild.id, model)
     interaction = FakeInteraction(guild=player.guild)
-    interaction.data = {"values": ["0"]}
+    interaction.data = {"values": [suggestion.uri]}
 
     await view.add_suggestion(interaction)
 
@@ -330,6 +361,31 @@ async def test_player_panel_suggestion_select_queues_track_and_refreshes(monkeyp
     assert_no_text_response(interaction)
     assert invalidated == [player.guild.id]
     assert updates == [(player.guild.id, player)]
+
+
+async def test_player_panel_suggestion_select_resolves_stable_value_after_restart(monkeypatch) -> None:
+    resolved = FakeTrack("Resolved Song", author="Artist")
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+
+    async def fake_resolve(value, requester):
+        assert value == "https://example.test/recommendation"
+        return resolved
+
+    async def fake_update(guild_id, seen_player):
+        return None
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "resolve_recommendation_value", fake_resolve)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+
+    view = ui.PlayerPanelView(register_persistent_controls=True)
+    interaction = FakeInteraction(guild=player.guild)
+    interaction.data = {"values": ["https://example.test/recommendation"]}
+
+    await view.add_suggestion(interaction)
+
+    assert list(player.queue) == [resolved]
+    assert interaction.response.deferred is True
 
 
 async def test_player_panel_controls_report_empty_states_ephemerally(monkeypatch) -> None:

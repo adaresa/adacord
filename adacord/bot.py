@@ -31,8 +31,22 @@ logger = logging.getLogger(__name__)
 class AdacordBot(commands.Bot):
     playback_restored: bool = False
 
+    async def sync_commands_safely(
+        self,
+        *,
+        guild: discord.Object | None = None,
+        description: str,
+    ) -> list[app_commands.AppCommand]:
+        try:
+            return await asyncio.wait_for(self.tree.sync(guild=guild), timeout=COMMAND_SYNC_TIMEOUT)
+        except discord.Forbidden:
+            logger.exception("Could not sync slash commands for %s.", description)
+        except asyncio.TimeoutError:
+            logger.exception("Timed out syncing slash commands for %s.", description)
+        return []
+
     async def setup_hook(self) -> None:
-        controls = PlayerPanelView()
+        controls = PlayerPanelView(register_persistent_controls=True)
         self.add_view(controls)
         custom_ids = [item.custom_id for item in controls.walk_children() if getattr(item, "custom_id", None)]
         logger.info(
@@ -46,25 +60,19 @@ class AdacordBot(commands.Bot):
         if guild_id:
             guild = discord.Object(id=int(guild_id))
             self.tree.copy_global_to(guild=guild)
-            try:
-                synced = await asyncio.wait_for(self.tree.sync(guild=guild), timeout=COMMAND_SYNC_TIMEOUT)
-            except discord.Forbidden:
-                logger.exception(
-                    "Could not sync slash commands to guild %s. "
-                    "Confirm the configured dev bot is installed in that server.",
-                    guild_id,
-                )
-                return
-            except asyncio.TimeoutError:
-                logger.exception("Timed out syncing slash commands to guild %s.", guild_id)
+            synced = await self.sync_commands_safely(
+                guild=guild,
+                description=f"guild {guild_id}. Confirm the configured dev bot is installed in that server",
+            )
+            if not synced:
                 return
             logger.info("Synced %s slash commands to guild %s", len(synced), guild_id)
 
             self.tree.clear_commands(guild=None)
-            synced_global = await asyncio.wait_for(self.tree.sync(), timeout=COMMAND_SYNC_TIMEOUT)
+            synced_global = await self.sync_commands_safely(description="global command cleanup")
             logger.info("Cleared %s global slash commands", len(synced_global))
         else:
-            synced = await asyncio.wait_for(self.tree.sync(), timeout=COMMAND_SYNC_TIMEOUT)
+            synced = await self.sync_commands_safely(description="global commands")
             logger.info("Synced %s global slash commands", len(synced))
 
 
