@@ -6,6 +6,7 @@ import discord
 import pytest
 
 from adacord import events, ui
+from adacord.recommendations import Recommendation
 from adacord.state import get_guild_state, guild_states
 from conftest import FakeInteraction, FakeMessage, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack
 
@@ -118,6 +119,26 @@ def test_player_panel_view_renders_text_and_thumbnail() -> None:
     assert "Volume: 50%" in texts
     assert "`1.` Next [3:30]" in texts
     assert any(isinstance(item, discord.ui.Thumbnail) for item in view.walk_children())
+
+
+def test_player_panel_view_renders_suggestion_dropdown_when_available() -> None:
+    current = FakeTrack("Current")
+    suggestion = FakeTrack("Fresh Song", author="Artist")
+    player = FakePlayer(current=current)
+
+    model = ui.build_player_panel_model(
+        player,
+        player.guild.id,
+        (Recommendation(suggestion, "Artist - Fresh Song", "youtube music"),),
+    )
+    view = ui.PlayerPanelView(player.guild.id, model)
+    selects = [item for item in view.walk_children() if isinstance(item, discord.ui.Select)]
+
+    assert "adacord:player:suggestions" in custom_ids(view)
+    assert "**Suggested Next**" in "\n".join(text_components(view))
+    assert len(selects) == 1
+    assert selects[0].placeholder == "Choose a song to add"
+    assert selects[0].options[0].label == "Artist - Fresh Song"
 
 
 def test_build_queue_embed_paginates_tracks() -> None:
@@ -277,6 +298,38 @@ async def test_player_panel_controls_update_player_silently(monkeypatch) -> None
     assert loop_interaction.response.deferred is True
     assert_no_text_response(loop_interaction)
     assert len(updates) == 6
+
+
+async def test_player_panel_suggestion_select_queues_track_and_refreshes(monkeypatch) -> None:
+    suggestion = FakeTrack("Fresh Song", author="Artist")
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    updates = []
+    invalidated = []
+
+    async def fake_update(guild_id, seen_player):
+        updates.append((guild_id, seen_player))
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(ui, "clear_guild_recommendation_cache", lambda guild_id: invalidated.append(guild_id))
+
+    model = ui.build_player_panel_model(
+        player,
+        player.guild.id,
+        (Recommendation(suggestion, "Artist - Fresh Song", "youtube music"),),
+    )
+    view = ui.PlayerPanelView(player.guild.id, model)
+    interaction = FakeInteraction(guild=player.guild)
+    interaction.data = {"values": ["0"]}
+
+    await view.add_suggestion(interaction)
+
+    assert list(player.queue) == [suggestion]
+    assert suggestion.extras["requester"] == "tester"
+    assert interaction.response.deferred is True
+    assert_no_text_response(interaction)
+    assert invalidated == [player.guild.id]
+    assert updates == [(player.guild.id, player)]
 
 
 async def test_player_panel_controls_report_empty_states_ephemerally(monkeypatch) -> None:

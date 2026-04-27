@@ -10,7 +10,8 @@ import wavelink
 
 from adacord.persistence import save_player_state
 from adacord.config import default_volume
-from adacord.player import clear_player, get_player, queue_items, set_loop_mode, set_volume
+from adacord.player import add_tracks, clear_player, get_player, queue_items, set_loop_mode, set_volume
+from adacord.recommendations import Recommendation, clear_guild_recommendation_cache, recommendations_for_player
 from adacord.state import get_guild_state
 from adacord.utils import format_duration, track_display_title, track_requester
 
@@ -27,6 +28,7 @@ PLAYER_CONTROL_IDS = {
     "shuffle": "adacord:player:shuffle",
     "loop": "adacord:player:loop",
     "queue": "adacord:player:queue",
+    "suggestions": "adacord:player:suggestions",
 }
 
 PLAYER_ACCENTS = {
@@ -34,7 +36,7 @@ PLAYER_ACCENTS = {
     "playing": 0x22C55E,
     "paused": 0xEAB308,
 }
-DISPLAY_REFRESH_INTERVAL = 5.0
+DISPLAY_REFRESH_INTERVAL = 1.0
 
 
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
@@ -89,6 +91,7 @@ class PlayerPanelModel:
     loop_mode: str
     queue_count: int
     queue_preview: tuple[str, ...]
+    suggestions: tuple[Recommendation, ...]
     pause_label: str
     mute_label: str
     disabled: Mapping[str, bool]
@@ -131,7 +134,11 @@ def build_queue_preview(player: wavelink.Player | None) -> tuple[str, ...]:
     return tuple(preview)
 
 
-def build_player_panel_model(player: wavelink.Player | None, guild_id: int | None) -> PlayerPanelModel:
+def build_player_panel_model(
+    player: wavelink.Player | None,
+    guild_id: int | None,
+    suggestions: tuple[Recommendation, ...] = (),
+) -> PlayerPanelModel:
     state = get_guild_state(guild_id) if guild_id is not None else None
     current = player.current if player else None
     tracks = queue_items(player) if player else []
@@ -155,6 +162,7 @@ def build_player_panel_model(player: wavelink.Player | None, guild_id: int | Non
         loop_mode=loop_mode,
         queue_count=len(tracks),
         queue_preview=build_queue_preview(player),
+        suggestions=suggestions,
         pause_label="Resume" if bool(player and player.paused) else "Pause",
         mute_label="Unmute" if volume == 0 else "Mute",
         disabled=MappingProxyType({
@@ -257,6 +265,29 @@ class PlayerPanelView(discord.ui.LayoutView):
         container.add_item(discord.ui.Separator())
         queue_text = "\n".join(self.model.queue_preview) if self.model.queue_preview else "Queue is empty"
         container.add_item(discord.ui.TextDisplay(f"**Up Next**\n{queue_text}"))
+
+        if self.model.suggestions:
+            container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay("**Suggested Next**"))
+            suggestion_row = discord.ui.ActionRow()
+            suggestion_select = discord.ui.Select(
+                custom_id=PLAYER_CONTROL_IDS["suggestions"],
+                placeholder="Choose a song to add",
+                min_values=1,
+                max_values=1,
+                options=[
+                    discord.SelectOption(
+                        label=suggestion.label,
+                        value=str(index),
+                        description=suggestion.description,
+                    )
+                    for index, suggestion in enumerate(self.model.suggestions)
+                ],
+            )
+            suggestion_select.callback = self.add_suggestion
+            suggestion_row.add_item(suggestion_select)
+            container.add_item(suggestion_row)
+
         container.add_item(discord.ui.Separator())
 
         transport_row = discord.ui.ActionRow()
@@ -437,6 +468,30 @@ class PlayerPanelView(discord.ui.LayoutView):
             ephemeral=True,
         )
 
+    async def add_suggestion(self, interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.", ephemeral=True)
+            return
+
+        data = getattr(interaction, "data", None)
+        values = data.get("values") if isinstance(data, dict) else getattr(data, "values", None)
+        try:
+            index = int(values[0])
+            suggestion = self.model.suggestions[index]
+        except (TypeError, ValueError, IndexError):
+            await respond(interaction, "That suggestion is no longer available.", ephemeral=True)
+            return
+
+        extras = dict(suggestion.track.extras) if isinstance(getattr(suggestion.track, "extras", None), dict) else {}
+        extras["requester"] = str(interaction.user)
+        suggestion.track.extras = extras
+        await add_tracks(player, [suggestion.track])
+        await save_player_state(player)
+        clear_guild_recommendation_cache(player.guild.id)
+        await acknowledge(interaction)
+        await self.refresh(interaction)
+
 
 class QueueView(discord.ui.View):
     def __init__(self, guild_id: int, player: wavelink.Player | None):
@@ -560,7 +615,12 @@ async def create_or_update_display(
     manage_refresh: bool = True,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
-    view = PlayerPanelView(guild_id, build_player_panel_model(player, guild_id))
+    try:
+        suggestions = await recommendations_for_player(player)
+    except Exception:
+        logger.exception("Failed to load song recommendations")
+        suggestions = ()
+    view = PlayerPanelView(guild_id, build_player_panel_model(player, guild_id, suggestions))
 
     try:
         if state.display_message:

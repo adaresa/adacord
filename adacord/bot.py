@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import discord
@@ -14,6 +15,8 @@ from adacord.recovery import restore_playback_state
 from adacord.ui import PlayerPanelView
 
 load_dotenv()
+
+COMMAND_SYNC_TIMEOUT = 45
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,14 +46,25 @@ class AdacordBot(commands.Bot):
         if guild_id:
             guild = discord.Object(id=int(guild_id))
             self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
+            try:
+                synced = await asyncio.wait_for(self.tree.sync(guild=guild), timeout=COMMAND_SYNC_TIMEOUT)
+            except discord.Forbidden:
+                logger.exception(
+                    "Could not sync slash commands to guild %s. "
+                    "Confirm the configured dev bot is installed in that server.",
+                    guild_id,
+                )
+                return
+            except asyncio.TimeoutError:
+                logger.exception("Timed out syncing slash commands to guild %s.", guild_id)
+                return
             logger.info("Synced %s slash commands to guild %s", len(synced), guild_id)
 
             self.tree.clear_commands(guild=None)
-            synced_global = await self.tree.sync()
+            synced_global = await asyncio.wait_for(self.tree.sync(), timeout=COMMAND_SYNC_TIMEOUT)
             logger.info("Cleared %s global slash commands", len(synced_global))
         else:
-            synced = await self.tree.sync()
+            synced = await asyncio.wait_for(self.tree.sync(), timeout=COMMAND_SYNC_TIMEOUT)
             logger.info("Synced %s global slash commands", len(synced))
 
 

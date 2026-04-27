@@ -137,6 +137,21 @@ async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
     return tracks
 
 
+async def search_lavalink(query: str, requester: str, *, limit: int | None = None) -> list[wavelink.Playable]:
+    found = await wavelink.Playable.search(query, source=None)
+
+    if isinstance(found, wavelink.Playlist):
+        tracks = list(found.tracks)
+    else:
+        tracks = list(found)
+
+    if limit is not None:
+        tracks = tracks[:limit]
+
+    apply_requester(tracks, requester, query)
+    return tracks
+
+
 def spotify_query_from_parts(title: str | None, artists: str | None) -> str | None:
     if not title:
         return None
