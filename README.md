@@ -131,6 +131,7 @@ YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
 | `/move <from_pos> <to_pos>` | Move a queued track |
 
 Playback controls such as pause, resume, skip, stop, queue, shuffle, loop, mute, and volume live on the persistent player panel.
+The persistent player panel can also show new song suggestions resolved through Lavalink/LavaSrc and YouTube Music search.
 
 ## Local Development
 

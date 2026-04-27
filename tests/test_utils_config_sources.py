@@ -27,6 +27,7 @@ from adacord.sources import (
     LoadSummary,
     choose_best_song_candidate,
     load_tracks,
+    search_lavalink,
     search_youtube,
     spotify_public_playlist_queries,
 )
@@ -205,6 +206,23 @@ async def test_search_youtube_handles_empty_results(monkeypatch) -> None:
     monkeypatch.setattr(wavelink.Playable, "search", staticmethod(fake_search))
 
     assert await search_youtube("missing song", "tester") == []
+
+
+async def test_search_lavalink_keeps_custom_prefix_and_limits_results(monkeypatch, fake_track_factory) -> None:
+    tracks = [fake_track_factory("First"), fake_track_factory("Second"), fake_track_factory("Third")]
+    calls = []
+
+    async def fake_search(query: str, *, source=None):
+        calls.append((query, source))
+        return tracks
+
+    monkeypatch.setattr(wavelink.Playable, "search", staticmethod(fake_search))
+
+    resolved = await search_lavalink("sprec:mix:isrc:GBDUW0000053", "tester", limit=2)
+
+    assert resolved == tracks[:2]
+    assert calls == [("sprec:mix:isrc:GBDUW0000053", None)]
+    assert tracks[0].extras["query"] == "sprec:mix:isrc:GBDUW0000053"
 
 
 async def test_load_tracks_uses_public_spotify_metadata(monkeypatch, fake_track_factory) -> None:
