@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +42,20 @@ from adacord.utils import (
     track_requester,
 )
 from conftest import FakePlayer, FakeQueue, FakeTrack
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_lavalink_playlist_limits_cover_large_playlists() -> None:
+    config = (REPO_ROOT / "lavalink/application.yml").read_text(encoding="utf-8")
+    youtube_limit = re.search(r"^\s+youtubePlaylistLoadLimit:\s+(\d+)\s*$", config, flags=re.MULTILINE)
+    lavasrc_playlist_limit = re.search(r"^\s+playlistLoadLimit:\s+(\d+)\s*$", config, flags=re.MULTILINE)
+
+    assert youtube_limit is not None
+    assert int(youtube_limit.group(1)) >= 50
+    assert lavasrc_playlist_limit is not None
+    assert int(lavasrc_playlist_limit.group(1)) >= 50
 
 
 def test_url_detection() -> None:
