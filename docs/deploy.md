@@ -53,7 +53,7 @@ cd /opt/adacord
 git fetch origin main
 git reset --hard origin/main
 docker compose pull
-docker compose up -d
+docker compose up -d --force-recreate
 docker image prune -f
 ```
 
