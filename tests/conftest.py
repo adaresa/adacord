@@ -108,6 +108,7 @@ class FakeNode:
 class FakeGuild:
     def __init__(self, guild_id: int = 123):
         self.id = guild_id
+        self.me = object()
         self.voice_client = None
 
 
@@ -196,11 +197,25 @@ class FakeMember:
 
 
 class FakeVoiceChannel:
-    def __init__(self, *, guild: FakeGuild | None = None, player: FakePlayer | None = None):
+    def __init__(
+        self,
+        *,
+        guild: FakeGuild | None = None,
+        player: FakePlayer | None = None,
+        permissions=None,
+        name: str = "testing voice",
+    ):
         self.guild = guild or FakeGuild()
         self.player = player
         self.connect_kwargs = None
         self.id = 456
+        self.name = name
+        self.permissions = permissions or SimpleNamespace(view_channel=True, connect=True, speak=True)
+        self.permission_checks = []
+
+    def permissions_for(self, member):
+        self.permission_checks.append(member)
+        return self.permissions
 
     async def connect(self, **kwargs):
         self.connect_kwargs = kwargs

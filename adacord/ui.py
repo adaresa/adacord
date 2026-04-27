@@ -685,11 +685,13 @@ async def create_or_update_display(
 async def update_display_for_guild(
     guild_id: int,
     player: wavelink.Player | None = None,
+    *,
+    manage_refresh: bool = True,
 ) -> None:
     state = get_guild_state(guild_id)
     has_music = bool(player and (player.current or not player.queue.is_empty))
     if state.display_channel and has_music:
-        await create_or_update_display(guild_id, state.display_channel, player)
+        await create_or_update_display(guild_id, state.display_channel, player, manage_refresh=manage_refresh)
     elif state.display_message and not has_music:
         stop_display_refresh(guild_id)
         try:

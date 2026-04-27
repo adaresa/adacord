@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import asyncio
 
 import pytest
 
@@ -11,8 +12,10 @@ from conftest import FakePlayer, FakeQueue, FakeTrack
 @pytest.fixture(autouse=True)
 def clear_recommendation_cache():
     recommendations.clear_recommendation_cache()
+    recommendations.spotify_seed_disabled_until = 0.0
     yield
     recommendations.clear_recommendation_cache()
+    recommendations.spotify_seed_disabled_until = 0.0
 
 
 def test_recommendation_queries_use_spotify_isrc_and_youtube_fallbacks() -> None:
@@ -97,6 +100,27 @@ async def test_recommendations_cache_by_current_track(monkeypatch) -> None:
     assert len(calls) == 1
     assert first == second
     assert first[0].track.title == "Suggestion"
+
+
+async def test_recommendations_share_concurrent_refresh(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+    calls = 0
+
+    async def fake_load(seen_player):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return [FakeTrack("Suggestion", author="Artist")]
+
+    monkeypatch.setattr(recommendations, "load_recommendation_candidates", fake_load)
+
+    first, second = await asyncio.gather(
+        recommendations.recommendations_for_player(player),
+        recommendations.recommendations_for_player(player),
+    )
+
+    assert calls == 1
+    assert first == second
 
 
 async def test_recommendations_skip_load_when_refresh_not_allowed(monkeypatch) -> None:
@@ -249,6 +273,29 @@ async def test_load_recommendation_candidates_uses_spotify_seed_recommendations(
     assert "spsearch:MGMT - Kids" in calls
     assert "sprec:mix:track:spotify-kids" in calls
     assert suggestion in candidates
+
+
+async def test_spotify_seed_backoff_stops_after_first_failure(monkeypatch) -> None:
+    player = FakePlayer(
+        current=FakeTrack("First", author="Artist A"),
+        queue=FakeQueue([FakeTrack("Second", author="Artist B"), FakeTrack("Third", author="Artist C")]),
+    )
+    calls = []
+    now = 1000.0
+
+    async def fake_search(query, requester, *, limit=None):
+        calls.append(query)
+        raise RuntimeError("spotify unavailable")
+
+    monkeypatch.setattr(recommendations.time, "monotonic", lambda: now)
+    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
+
+    assert await recommendations.spotify_seed_tracks(player) == []
+    assert calls == ["spsearch:Artist A - First"]
+    assert recommendations.spotify_seed_disabled_until == now + recommendations.SPOTIFY_SEED_BACKOFF_SECONDS
+
+    assert await recommendations.spotify_seed_tracks(player) == []
+    assert calls == ["spsearch:Artist A - First"]
 
 
 async def test_resolve_recommendation_value_uses_lavalink_search(monkeypatch) -> None:
