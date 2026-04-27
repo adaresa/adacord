@@ -43,7 +43,7 @@ plugins:
       youtube: false
     spotify:
       countryCode: "US"
-      playlistLoadLimit: 6
+      playlistLoadLimit: 50
       albumLoadLimit: 6
 
 lavalink:
@@ -81,7 +81,7 @@ lavalink:
     resamplingQuality: LOW
     trackStuckThresholdMs: 10000
     playerUpdateInterval: 5
-    youtubePlaylistLoadLimit: 6
+    youtubePlaylistLoadLimit: 50
     timeouts:
       connectTimeoutMs: 5000
       connectionRequestTimeoutMs: 5000
