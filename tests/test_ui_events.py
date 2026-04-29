@@ -562,13 +562,17 @@ async def test_deleted_display_clears_state_when_player_is_disconnected() -> Non
     state = get_guild_state(guild_id)
     channel = FakeTextChannel()
     message = FakeMessage()
+    task = FakeTask()
     state.display_message = message
     state.display_message_id = message.id
     state.display_channel = channel
     state.display_channel_id = channel.id
+    state.display_refresh_task = task
 
     await ui.handle_display_message_delete(guild_id, channel.id, message.id, None)
 
+    assert task.cancelled is True
+    assert state.display_refresh_task is None
     assert state.display_message is None
     assert state.display_message_id is None
     assert state.display_channel is None

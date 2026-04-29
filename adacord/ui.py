@@ -19,7 +19,7 @@ from adacord.recommendations import (
     recommendations_for_player,
     resolve_recommendation_value,
 )
-from adacord.state import get_guild_state
+from adacord.state import GuildState, get_guild_state
 from adacord.utils import format_duration, track_display_title, track_requester
 
 logger = logging.getLogger(__name__)
@@ -717,7 +717,7 @@ async def update_display_for_guild(
         state.display_message_id = None
 
 
-def display_message_matches(state, message_id: int) -> bool:
+def display_message_matches(state: GuildState, message_id: int) -> bool:
     return state.display_message_id == message_id or getattr(state.display_message, "id", None) == message_id
 
 
@@ -740,5 +740,6 @@ async def handle_display_message_delete(
     if should_maintain_display(player) and channel:
         await create_or_update_display(guild_id, channel, player)
     elif not should_maintain_display(player):
+        stop_display_refresh(guild_id)
         state.display_channel = None
         state.display_channel_id = None
