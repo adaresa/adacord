@@ -175,6 +175,7 @@ async def test_play_reports_connection_failure(monkeypatch) -> None:
 
     assert last_response_text(interaction) == "Could not connect to voice: voice denied"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_play_rejects_missing_voice_permissions_before_defer(monkeypatch) -> None:
@@ -214,6 +215,7 @@ async def test_play_reports_load_failure(monkeypatch) -> None:
 
     assert last_response_text(interaction) == "Could not load that request: source down"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_play_reports_playback_start_failure(monkeypatch) -> None:
@@ -234,6 +236,28 @@ async def test_play_reports_playback_start_failure(monkeypatch) -> None:
 
     assert last_response_text(interaction) == "Could not start playback: queue rejected"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
+
+
+async def test_play_reports_empty_results_and_clears_deferred_response(monkeypatch) -> None:
+    interaction = FakeInteraction(guild=FakeGuild())
+    player = FakePlayer(guild=interaction.guild, playing=False)
+
+    async def fake_ensure_player(guild, channel):
+        return player
+
+    async def fake_queue_track_request(player, query: str, requester: str):
+        return TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False)
+
+    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
+    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
+
+    await commands.play_impl(interaction, "song")
+
+    assert last_response_text(interaction) == "No playable tracks were found."
+    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_empty_state_commands_respond_ephemerally(monkeypatch) -> None:

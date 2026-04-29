@@ -4,6 +4,7 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
+import wavelink
 
 from adacord.persistence import save_player_state
 from adacord.player import (
@@ -21,6 +22,7 @@ from adacord.ui import (
     player_for_interaction,
     refresh_display_with_recommendations,
     respond,
+    respond_and_clear_deferred,
     update_display_for_guild,
 )
 
@@ -34,7 +36,7 @@ def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel
     return voice.channel if voice else None
 
 
-async def connect_for_interaction(interaction: discord.Interaction):
+async def connect_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
     if not interaction.guild:
         await respond(interaction, "This command can only be used in a server.", ephemeral=True)
         return None
@@ -54,11 +56,11 @@ async def connect_for_interaction(interaction: discord.Interaction):
     try:
         player = await ensure_player(interaction.guild, channel)
     except MissingVoicePermissions as exc:
-        await respond(interaction, str(exc), ephemeral=True)
+        await respond_and_clear_deferred(interaction, str(exc), ephemeral=True)
         return None
     except Exception as exc:
         logger.exception("Failed to connect Lavalink player to voice")
-        await respond(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
+        await respond_and_clear_deferred(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
         return None
 
     state = get_guild_state(interaction.guild.id)
@@ -87,15 +89,15 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         result = await queue_track_request(player, query, str(interaction.user))
     except TrackRequestLoadError as exc:
         logger.exception("Failed to load query %r", query)
-        await respond(interaction, f"Could not load that request: {exc}", ephemeral=True)
+        await respond_and_clear_deferred(interaction, f"Could not load that request: {exc}", ephemeral=True)
         return
     except TrackRequestPlaybackError as exc:
         logger.exception("Failed to start playback for query %r", query)
-        await respond(interaction, f"Could not start playback: {exc}", ephemeral=True)
+        await respond_and_clear_deferred(interaction, f"Could not start playback: {exc}", ephemeral=True)
         return
 
     if not result.tracks:
-        await respond(interaction, "No playable tracks were found.", ephemeral=True)
+        await respond_and_clear_deferred(interaction, "No playable tracks were found.", ephemeral=True)
         return
 
     if result.was_idle and interaction.channel:

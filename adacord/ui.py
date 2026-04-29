@@ -97,6 +97,21 @@ async def acknowledge(interaction: discord.Interaction) -> None:
         logger.exception("Failed to acknowledge interaction")
 
 
+async def respond_and_clear_deferred(
+    interaction: discord.Interaction,
+    message: str,
+    *,
+    ephemeral: bool = False,
+) -> None:
+    await respond(interaction, message, ephemeral=ephemeral)
+    try:
+        await interaction.delete_original_response()
+    except discord.NotFound:
+        pass
+    except discord.HTTPException:
+        logger.exception("Failed to delete deferred interaction response")
+
+
 @dataclass(frozen=True)
 class PlayerPanelModel:
     state: str
@@ -585,15 +600,15 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
             result = await queue_track_request(player, query, str(interaction.user), play_first=play_first)
         except TrackRequestLoadError as exc:
             logger.exception("Failed to load query %r from player panel", query)
-            await respond(interaction, f"Could not load that request: {exc}", ephemeral=True)
+            await respond_and_clear_deferred(interaction, f"Could not load that request: {exc}", ephemeral=True)
             return
         except TrackRequestPlaybackError as exc:
             logger.exception("Failed to start playback for query %r from player panel", query)
-            await respond(interaction, f"Could not start playback: {exc}", ephemeral=True)
+            await respond_and_clear_deferred(interaction, f"Could not start playback: {exc}", ephemeral=True)
             return
 
         if not result.tracks:
-            await respond(interaction, "No playable tracks were found.", ephemeral=True)
+            await respond_and_clear_deferred(interaction, "No playable tracks were found.", ephemeral=True)
             return
 
         await update_display_for_guild(self.guild_id, player, manage_refresh=False)

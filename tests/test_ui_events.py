@@ -553,6 +553,7 @@ async def test_add_song_modal_reports_empty_results(monkeypatch) -> None:
 
     assert last_response_text(interaction) == "No playable tracks were found."
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_add_song_modal_reports_load_and_playback_failures(monkeypatch) -> None:
@@ -571,6 +572,7 @@ async def test_add_song_modal_reports_load_and_playback_failures(monkeypatch) ->
 
     assert last_response_text(interaction) == "Could not load that request: source down"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
     async def fail_playback(player, query, requester, *, play_first=False):
         raise TrackRequestPlaybackError("queue rejected")
@@ -584,6 +586,7 @@ async def test_add_song_modal_reports_load_and_playback_failures(monkeypatch) ->
 
     assert last_response_text(interaction) == "Could not start playback: queue rejected"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_player_panel_suggestion_select_queues_track_and_refreshes(monkeypatch) -> None:
