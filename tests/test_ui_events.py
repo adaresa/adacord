@@ -7,7 +7,9 @@ import pytest
 
 from adacord import events, ui
 from adacord.recommendations import Recommendation
+from adacord.sources import LoadSummary
 from adacord.state import get_guild_state, guild_states
+from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, TrackRequestResult
 from conftest import FakeInteraction, FakeMessage, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack
 
 
@@ -26,6 +28,12 @@ def text_components(view: discord.ui.LayoutView) -> list[str]:
 def assert_no_text_response(interaction: FakeInteraction) -> None:
     assert interaction.response.sent == []
     assert interaction.followup.sent == []
+
+
+def last_response_text(interaction: FakeInteraction) -> str:
+    if interaction.response.sent:
+        return interaction.response.sent[-1]["args"][0]
+    return interaction.followup.sent[-1]["args"][0]
 
 
 class FakeTask:
@@ -90,6 +98,7 @@ def test_player_panel_view_is_persistent_v2_with_stable_controls() -> None:
         "adacord:player:shuffle",
         "adacord:player:loop",
         "adacord:player:queue",
+        "adacord:player:add",
     }
     assert all(component.get("type") != "embed" for component in view.to_components())
 
@@ -141,6 +150,15 @@ def test_player_panel_view_renders_text_and_thumbnail() -> None:
     assert "Volume: 50%" in texts
     assert "`1.` Next [3:30]" in texts
     assert any(isinstance(item, discord.ui.Thumbnail) for item in view.walk_children())
+
+
+def test_player_panel_view_renders_enabled_add_button_when_connected() -> None:
+    player = FakePlayer()
+    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    add_button = next(item for item in view.walk_children() if getattr(item, "custom_id", None) == "adacord:player:add")
+
+    assert add_button.label == "Add song"
+    assert add_button.disabled is False
 
 
 def test_player_panel_view_renders_suggestion_dropdown_when_available() -> None:
@@ -394,6 +412,122 @@ async def test_player_panel_controls_update_player_silently(monkeypatch) -> None
     assert loop_interaction.response.deferred is True
     assert_no_text_response(loop_interaction)
     assert len(updates) == 6
+
+
+async def test_player_panel_add_button_opens_modal(monkeypatch) -> None:
+    player = FakePlayer()
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+
+    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    interaction = FakeInteraction(guild=player.guild)
+
+    await view.add(interaction)
+
+    assert isinstance(interaction.response.modal, ui.AddSongModal)
+    assert interaction.response.modal.guild_id == player.guild.id
+
+
+async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatch) -> None:
+    player = FakePlayer(playing=False)
+    track = FakeTrack("One More Time")
+    updates = []
+    backgrounds = []
+
+    async def fake_queue_track_request(seen_player, query, requester):
+        assert seen_player is player
+        assert query == "daft punk"
+        assert requester == "tester"
+        player.current = track
+        return TrackRequestResult([track], LoadSummary("One More Time", 1, "youtube"), True)
+
+    async def fake_update(guild_id, seen_player, *, manage_refresh=True):
+        updates.append((guild_id, seen_player, manage_refresh))
+
+    def fake_create_task(coro):
+        backgrounds.append(coro)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+
+    modal = ui.AddSongModal(player.guild.id)
+    modal.query._value = "daft punk"
+    interaction = FakeInteraction(guild=player.guild)
+
+    await modal.on_submit(interaction)
+
+    assert player.current is track
+    assert interaction.response.deferred is True
+    assert interaction.response.defer_kwargs == {"ephemeral": True, "thinking": True}
+    assert interaction.deleted_original_response is True
+    assert_no_text_response(interaction)
+    assert updates == [(player.guild.id, player, False)]
+    assert len(backgrounds) == 1
+
+
+async def test_add_song_modal_reports_no_player(monkeypatch) -> None:
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: None)
+    modal = ui.AddSongModal(123)
+    modal.query._value = "daft punk"
+    interaction = FakeInteraction(guild=FakePlayer().guild)
+
+    await modal.on_submit(interaction)
+
+    assert last_response_text(interaction) == "Not connected."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+
+
+async def test_add_song_modal_reports_empty_results(monkeypatch) -> None:
+    player = FakePlayer()
+
+    async def fake_queue_track_request(player, query, requester):
+        return TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False)
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
+
+    modal = ui.AddSongModal(player.guild.id)
+    modal.query._value = "missing song"
+    interaction = FakeInteraction(guild=player.guild)
+
+    await modal.on_submit(interaction)
+
+    assert last_response_text(interaction) == "No playable tracks were found."
+    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+
+
+async def test_add_song_modal_reports_load_and_playback_failures(monkeypatch) -> None:
+    player = FakePlayer()
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+
+    async def fail_load(player, query, requester):
+        raise TrackRequestLoadError("source down")
+
+    modal = ui.AddSongModal(player.guild.id)
+    modal.query._value = "bad source"
+    interaction = FakeInteraction(guild=player.guild)
+    monkeypatch.setattr(ui, "queue_track_request", fail_load)
+
+    await modal.on_submit(interaction)
+
+    assert last_response_text(interaction) == "Could not load that request: source down"
+    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+
+    async def fail_playback(player, query, requester):
+        raise TrackRequestPlaybackError("queue rejected")
+
+    modal = ui.AddSongModal(player.guild.id)
+    modal.query._value = "bad playback"
+    interaction = FakeInteraction(guild=player.guild)
+    monkeypatch.setattr(ui, "queue_track_request", fail_playback)
+
+    await modal.on_submit(interaction)
+
+    assert last_response_text(interaction) == "Could not start playback: queue rejected"
+    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
 
 
 async def test_player_panel_suggestion_select_queues_track_and_refreshes(monkeypatch) -> None:
