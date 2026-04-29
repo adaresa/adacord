@@ -10,9 +10,9 @@ import wavelink
 from adacord.commands import setup_all_commands
 from adacord.config import discord_guild_id, discord_token
 from adacord.events import handle_inactive_player, handle_track_end, handle_track_start
-from adacord.player import connect_lavalink
+from adacord.player import connect_lavalink, get_player
 from adacord.recovery import restore_playback_state
-from adacord.ui import PlayerPanelView
+from adacord.ui import PlayerPanelView, handle_display_message_delete
 
 load_dotenv()
 
@@ -144,6 +144,19 @@ def register_events(bot: AdacordBot) -> None:
     async def on_wavelink_inactive_player(player: wavelink.Player) -> None:
         await handle_inactive_player(player)
         await player.disconnect()
+
+    @bot.event
+    async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
+        if payload.guild_id is None:
+            return
+        guild = bot.get_guild(payload.guild_id)
+        player = get_player(guild) if guild else None
+        await handle_display_message_delete(
+            payload.guild_id,
+            payload.channel_id,
+            payload.message_id,
+            player,
+        )
 
 
 bot = create_bot()

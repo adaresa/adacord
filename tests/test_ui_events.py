@@ -39,6 +39,11 @@ class FakeTask:
         self.cancelled = True
 
 
+class MissingOnEditMessage(FakeMessage):
+    async def edit(self, **kwargs):
+        raise discord.HTTPException(SimpleNamespace(status=404, reason="Missing"), "message missing")
+
+
 def test_build_player_panel_model_for_idle_state() -> None:
     model = ui.build_player_panel_model(None, 123)
 
@@ -51,6 +56,14 @@ def test_build_player_panel_model_for_idle_state() -> None:
     assert model.disabled["pause_resume"] is True
     with pytest.raises(TypeError):
         model.disabled["pause_resume"] = False
+
+
+def test_player_panel_view_renders_idle_leave_hint() -> None:
+    view = ui.PlayerPanelView(123, ui.build_player_panel_model(FakePlayer(), 123))
+    texts = "\n".join(text_components(view))
+
+    assert "### Nothing playing" in texts
+    assert "Use `/dc` to leave." in texts
 
 
 def test_player_panel_model_without_guild_does_not_create_state() -> None:
@@ -218,7 +231,29 @@ async def test_create_or_update_display_restores_channel_on_existing_v2_edit() -
     assert state.display_channel_id == channel.id
 
 
-def test_display_refresh_starts_and_stops(monkeypatch) -> None:
+async def test_create_or_update_display_recreates_missing_v2_message() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    stale_message = MissingOnEditMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    stale_message.id = 111
+    state.display_message = stale_message
+    state.display_message_id = stale_message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+
+    message = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert message is channel.sent[0]
+    assert state.display_message is message
+    assert state.display_message_id == message.id
+    assert state.display_channel is channel
+    assert state.display_channel_id == channel.id
+
+
+def test_display_refresh_starts_reuses_and_stops(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"), playing=True)
     state = get_guild_state(player.guild.id)
     state.display_channel = FakeTextChannel()
@@ -235,29 +270,59 @@ def test_display_refresh_starts_and_stops(monkeypatch) -> None:
 
     player.paused = True
     ui.ensure_display_refresh(player.guild.id, player)
+    assert task.cancelled is False
+    assert state.display_refresh_task is task
+
+    player.connected = False
+    ui.ensure_display_refresh(player.guild.id, player)
     assert task.cancelled is True
     assert state.display_refresh_task is None
 
 
-async def test_display_refresh_loop_edits_progress_without_rescheduling(monkeypatch) -> None:
+def test_idle_display_refresh_starts_for_connected_idle_player(monkeypatch) -> None:
+    player = FakePlayer()
+    state = get_guild_state(player.guild.id)
+    state.display_channel = FakeTextChannel()
+    task = FakeTask()
+
+    def fake_create_task(coro):
+        coro.close()
+        return task
+
+    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+
+    ui.ensure_display_refresh(player.guild.id, player)
+
+    assert state.display_refresh_task is task
+
+
+async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"), playing=True)
     state = get_guild_state(player.guild.id)
     state.display_channel = FakeTextChannel()
     calls = []
+    delays = []
 
     async def fake_sleep(delay):
-        assert delay == ui.DISPLAY_REFRESH_INTERVAL
+        delays.append(delay)
 
     async def fake_create_or_update(guild_id, channel, seen_player, *, manage_refresh=True):
         calls.append((guild_id, channel, seen_player, manage_refresh))
-        seen_player.paused = True
+        if len(calls) == 1:
+            seen_player.paused = True
+        else:
+            seen_player.connected = False
 
     monkeypatch.setattr(ui.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_or_update)
 
     await ui.refresh_display_progress(player.guild.id, player)
 
-    assert calls == [(player.guild.id, state.display_channel, player, False)]
+    assert delays == [ui.DISPLAY_REFRESH_INTERVAL, ui.IDLE_DISPLAY_REFRESH_INTERVAL]
+    assert calls == [
+        (player.guild.id, state.display_channel, player, False),
+        (player.guild.id, state.display_channel, player, False),
+    ]
 
 
 async def test_progress_refresh_does_not_refresh_recommendations(monkeypatch) -> None:
@@ -388,6 +453,32 @@ async def test_player_panel_suggestion_select_resolves_stable_value_after_restar
     assert interaction.response.deferred is True
 
 
+async def test_player_panel_stop_clears_playback_but_keeps_voice_and_refreshes(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True, queue=FakeQueue([FakeTrack("Next")]))
+    get_guild_state(player.guild.id).loop_mode = "queue"
+    updates = []
+
+    async def fake_update(guild_id, seen_player):
+        updates.append((guild_id, seen_player))
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+
+    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    interaction = FakeInteraction(guild=player.guild)
+
+    await view.stop(interaction)
+
+    assert player.queue.is_empty
+    assert player.skip_calls == [True]
+    assert player.disconnect_calls == 0
+    assert player.guild.voice_client is player
+    assert get_guild_state(player.guild.id).loop_mode == "none"
+    assert interaction.response.deferred is True
+    assert_no_text_response(interaction)
+    assert updates == [(player.guild.id, player)]
+
+
 async def test_player_panel_controls_report_empty_states_ephemerally(monkeypatch) -> None:
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: None)
     view = ui.PlayerPanelView()
@@ -399,19 +490,93 @@ async def test_player_panel_controls_report_empty_states_ephemerally(monkeypatch
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
-async def test_update_display_deletes_existing_message_when_player_is_idle() -> None:
+async def test_update_display_keeps_existing_message_when_player_is_idle() -> None:
     player = FakePlayer()
     state = get_guild_state(player.guild.id)
-    state.display_message = FakeMessage()
-    state.display_channel = FakeTextChannel()
+    channel = FakeTextChannel()
+    message = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
     task = FakeTask()
     state.display_refresh_task = task
 
     await ui.update_display_for_guild(player.guild.id, player)
 
+    assert task.cancelled is False
+    assert state.display_refresh_task is task
+    assert message.deleted is False
+    assert state.display_message is message
+    assert state.display_message_id == message.id
+    assert state.display_channel is channel
+    assert state.display_channel_id == channel.id
+    assert "### Nothing playing" in "\n".join(text_components(message.edits[-1]["view"]))
+
+
+async def test_update_display_deletes_existing_message_when_player_is_disconnected() -> None:
+    guild_id = 123
+    state = get_guild_state(guild_id)
+    message = FakeMessage()
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = FakeTextChannel()
+    state.display_channel_id = state.display_channel.id
+    task = FakeTask()
+    state.display_refresh_task = task
+
+    await ui.update_display_for_guild(guild_id, None)
+
     assert task.cancelled is True
+    assert message.deleted is True
     assert state.display_message is None
+    assert state.display_message_id is None
     assert state.display_channel is None
+    assert state.display_channel_id is None
+
+
+async def test_deleted_idle_display_is_recreated_while_player_is_connected() -> None:
+    player = FakePlayer()
+    state = get_guild_state(player.guild.id)
+    channel = FakeTextChannel()
+    message = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+
+    await ui.handle_display_message_delete(player.guild.id, channel.id, message.id, player)
+
+    assert state.display_message is channel.sent[0]
+    assert state.display_message_id == channel.sent[0].id
+    assert state.display_channel is channel
+    assert "Use `/dc` to leave." in "\n".join(text_components(channel.sent[0].view))
+
+
+async def test_deleted_display_clears_state_when_player_is_disconnected() -> None:
+    guild_id = 123
+    state = get_guild_state(guild_id)
+    channel = FakeTextChannel()
+    message = FakeMessage()
+    task = FakeTask()
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+    state.display_refresh_task = task
+
+    await ui.handle_display_message_delete(guild_id, channel.id, message.id, None)
+
+    assert task.cancelled is True
+    assert state.display_refresh_task is None
+    assert state.display_message is None
+    assert state.display_message_id is None
+    assert state.display_channel is None
+    assert state.display_channel_id is None
 
 
 async def test_queue_view_clamps_page_when_queue_shrinks(monkeypatch) -> None:
@@ -479,15 +644,21 @@ async def test_track_start_updates_display(monkeypatch) -> None:
     assert calls == [(player.guild.id, player)]
 
 
-async def test_inactive_player_updates_display(monkeypatch) -> None:
+async def test_inactive_player_removes_display_and_clears_saved_state(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"))
     calls = []
+    clears = []
 
     async def fake_update(guild_id, seen_player):
         calls.append(("update", guild_id, seen_player))
 
+    async def fake_clear(guild_id):
+        clears.append(guild_id)
+
     monkeypatch.setattr(events, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(events, "clear_saved_guild_state", fake_clear)
 
     await events.handle_inactive_player(player)
 
-    assert calls == [("update", player.guild.id, player)]
+    assert calls == [("update", player.guild.id, None)]
+    assert clears == [player.guild.id]
