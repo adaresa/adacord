@@ -20,6 +20,7 @@ from adacord.recommendations import (
     resolve_recommendation_value,
 )
 from adacord.state import GuildState, get_guild_state
+from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, queue_track_request
 from adacord.utils import format_duration, track_display_title, track_requester
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ PLAYER_CONTROL_IDS = {
     "shuffle": "adacord:player:shuffle",
     "loop": "adacord:player:loop",
     "queue": "adacord:player:queue",
+    "add": "adacord:player:add",
     "suggestions": "adacord:player:suggestions",
 }
 
@@ -45,6 +47,13 @@ PLAYER_ACCENTS = {
 }
 DISPLAY_REFRESH_INTERVAL = 1.0
 IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
+
+
+async def refresh_display_with_recommendations(guild_id: int, player: wavelink.Player) -> None:
+    try:
+        await update_display_for_guild(guild_id, player)
+    except Exception:
+        logger.exception("Failed to refresh player display with recommendations")
 
 
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
@@ -86,6 +95,21 @@ async def acknowledge(interaction: discord.Interaction) -> None:
         pass
     except discord.HTTPException:
         logger.exception("Failed to acknowledge interaction")
+
+
+async def respond_and_clear_deferred(
+    interaction: discord.Interaction,
+    message: str,
+    *,
+    ephemeral: bool = False,
+) -> None:
+    await respond(interaction, message, ephemeral=ephemeral)
+    try:
+        await interaction.delete_original_response()
+    except discord.NotFound:
+        pass
+    except discord.HTTPException:
+        logger.exception("Failed to delete deferred interaction response")
 
 
 @dataclass(frozen=True)
@@ -151,6 +175,7 @@ def build_player_panel_model(
     current = player.current if player else None
     tracks = queue_items(player) if player else []
     has_music = bool(current or tracks)
+    connected = bool(player and getattr(player, "connected", True))
     panel_state = "idle"
     if current:
         panel_state = "paused" if bool(player and player.paused) else "playing"
@@ -184,6 +209,7 @@ def build_player_panel_model(
             "shuffle": not bool(tracks),
             "loop": not has_music,
             "queue": not bool(tracks),
+            "add": not connected,
         }),
     )
 
@@ -278,6 +304,11 @@ class PlayerPanelView(discord.ui.LayoutView):
         else:
             container.add_item(discord.ui.TextDisplay("\n".join(header)))
         container.add_item(discord.ui.TextDisplay(" | ".join(summary)))
+
+        container.add_item(discord.ui.Separator())
+        add_row = discord.ui.ActionRow()
+        add_row.add_item(self.make_button("add", label="Add song", style=discord.ButtonStyle.success, callback=self.add))
+        container.add_item(add_row)
 
         container.add_item(discord.ui.Separator())
         queue_text = "\n".join(self.model.queue_preview) if self.model.queue_preview else "Queue is empty"
@@ -489,6 +520,13 @@ class PlayerPanelView(discord.ui.LayoutView):
             ephemeral=True,
         )
 
+    async def add(self, interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AddSongModal(self.guild_id_for(interaction)))
+
     async def add_suggestion(self, interaction: discord.Interaction) -> None:
         player = player_for_interaction(interaction)
         if not player:
@@ -521,6 +559,70 @@ class PlayerPanelView(discord.ui.LayoutView):
         await save_player_state(player)
         clear_guild_recommendation_cache(player.guild.id)
         await self.refresh(interaction)
+
+
+class AddSongModal(discord.ui.Modal, title="Add song"):
+    query = discord.ui.TextInput(
+        label="Song, URL, or playlist",
+        placeholder="Paste a link or type a search",
+        required=True,
+        max_length=500,
+    )
+    play_next = discord.ui.TextInput(
+        label="Play next? (optional)",
+        placeholder="Yes = next up",
+        required=False,
+        max_length=8,
+    )
+
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        query = str(self.query.value).strip()
+        if not query:
+            await respond(interaction, "Type a song, URL, or playlist first.", ephemeral=True)
+            return
+
+        play_first = play_next_requested(str(self.play_next.value or ""))
+        if play_first is None:
+            await respond(interaction, "Leave Play next empty, or type y/yes.", ephemeral=True)
+            return
+
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            result = await queue_track_request(player, query, str(interaction.user), play_first=play_first)
+        except TrackRequestLoadError as exc:
+            logger.exception("Failed to load query %r from player panel", query)
+            await respond_and_clear_deferred(interaction, f"Could not load that request: {exc}", ephemeral=True)
+            return
+        except TrackRequestPlaybackError as exc:
+            logger.exception("Failed to start playback for query %r from player panel", query)
+            await respond_and_clear_deferred(interaction, f"Could not start playback: {exc}", ephemeral=True)
+            return
+
+        if not result.tracks:
+            await respond_and_clear_deferred(interaction, "No playable tracks were found.", ephemeral=True)
+            return
+
+        await update_display_for_guild(self.guild_id, player, manage_refresh=False)
+        await acknowledge(interaction)
+        asyncio.create_task(refresh_display_with_recommendations(self.guild_id, player))
+
+
+def play_next_requested(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"y", "yes"}:
+        return True
+    return None
 
 
 class QueueView(discord.ui.View):

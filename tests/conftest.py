@@ -267,6 +267,7 @@ class FakeResponse:
         self.deferred = False
         self.sent = []
         self.edits = []
+        self.modal = None
         self._done = False
 
     def is_done(self) -> bool:
@@ -283,6 +284,10 @@ class FakeResponse:
 
     async def edit_message(self, **kwargs):
         self.edits.append(kwargs)
+        self._done = True
+
+    async def send_modal(self, modal):
+        self.modal = modal
         self._done = True
 
 

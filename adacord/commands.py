@@ -4,34 +4,29 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
+import wavelink
 
 from adacord.persistence import save_player_state
 from adacord.player import (
     MissingVoicePermissions,
-    add_tracks,
     disconnect_player,
     ensure_player,
     queue_items,
     validate_voice_channel_permissions,
 )
-from adacord.sources import load_tracks
 from adacord.state import get_guild_state
+from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, queue_track_request
 from adacord.ui import (
     acknowledge,
     create_or_update_display,
     player_for_interaction,
+    refresh_display_with_recommendations,
     respond,
+    respond_and_clear_deferred,
     update_display_for_guild,
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def refresh_display_with_recommendations(guild_id: int, player) -> None:
-    try:
-        await update_display_for_guild(guild_id, player)
-    except Exception:
-        logger.exception("Failed to refresh player display with recommendations")
 
 
 def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
@@ -41,60 +36,74 @@ def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel
     return voice.channel if voice else None
 
 
-async def play_impl(interaction: discord.Interaction, query: str) -> None:
+async def connect_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
     if not interaction.guild:
         await respond(interaction, "This command can only be used in a server.", ephemeral=True)
-        return
+        return None
 
     channel = user_voice_channel(interaction)
     if not channel:
         await respond(interaction, "Join a voice channel first.", ephemeral=True)
-        return
+        return None
 
     try:
         validate_voice_channel_permissions(interaction.guild, channel)
     except MissingVoicePermissions as exc:
         await respond(interaction, str(exc), ephemeral=True)
-        return
+        return None
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
         player = await ensure_player(interaction.guild, channel)
     except MissingVoicePermissions as exc:
-        await respond(interaction, str(exc), ephemeral=True)
-        return
+        await respond_and_clear_deferred(interaction, str(exc), ephemeral=True)
+        return None
     except Exception as exc:
         logger.exception("Failed to connect Lavalink player to voice")
-        await respond(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
-        return
+        await respond_and_clear_deferred(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
+        return None
 
     state = get_guild_state(interaction.guild.id)
     state.text_channel = interaction.channel
+    return player
+
+
+async def join_impl(interaction: discord.Interaction) -> None:
+    player = await connect_for_interaction(interaction)
+    if not player or not interaction.guild:
+        return
+
+    if interaction.channel:
+        await create_or_update_display(interaction.guild.id, interaction.channel, player)
+    else:
+        await update_display_for_guild(interaction.guild.id, player)
+    await acknowledge(interaction)
+
+
+async def play_impl(interaction: discord.Interaction, query: str) -> None:
+    player = await connect_for_interaction(interaction)
+    if not player or not interaction.guild:
+        return
 
     try:
-        tracks, summary = await load_tracks(query, str(interaction.user))
-    except Exception as exc:
+        result = await queue_track_request(player, query, str(interaction.user))
+    except TrackRequestLoadError as exc:
         logger.exception("Failed to load query %r", query)
-        await respond(interaction, f"Could not load that request: {exc}", ephemeral=True)
+        await respond_and_clear_deferred(interaction, f"Could not load that request: {exc}", ephemeral=True)
         return
-
-    if not tracks:
-        await respond(interaction, "No playable tracks were found.", ephemeral=True)
-        return
-
-    was_idle = not player.current and player.queue.is_empty
-    try:
-        await add_tracks(player, tracks)
-    except Exception as exc:
+    except TrackRequestPlaybackError as exc:
         logger.exception("Failed to start playback for query %r", query)
-        await respond(interaction, f"Could not start playback: {exc}", ephemeral=True)
+        await respond_and_clear_deferred(interaction, f"Could not start playback: {exc}", ephemeral=True)
         return
 
-    if was_idle and interaction.channel:
+    if not result.tracks:
+        await respond_and_clear_deferred(interaction, "No playable tracks were found.", ephemeral=True)
+        return
+
+    if result.was_idle and interaction.channel:
         await create_or_update_display(interaction.guild.id, interaction.channel, player, manage_refresh=False)
     else:
         await update_display_for_guild(interaction.guild.id, player, manage_refresh=False)
-    await save_player_state(player)
 
     await acknowledge(interaction)
     asyncio.create_task(refresh_display_with_recommendations(interaction.guild.id, player))
@@ -151,6 +160,10 @@ async def move_impl(interaction: discord.Interaction, from_pos: int, to_pos: int
 
 
 def setup_all_commands(bot: commands.Bot) -> None:
+    @bot.tree.command(name="join", description="Connect to voice and open the music display")
+    async def join(interaction: discord.Interaction) -> None:
+        await join_impl(interaction)
+
     @bot.tree.command(name="play", description="Play a YouTube URL/search or Spotify playlist link")
     @app_commands.describe(query="YouTube URL, search terms, or Spotify playlist URL")
     async def play(interaction: discord.Interaction, query: str) -> None:

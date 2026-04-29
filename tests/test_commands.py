@@ -6,6 +6,8 @@ import pytest
 
 from adacord import commands
 from adacord.sources import LoadSummary
+from adacord.state import get_guild_state
+from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, TrackRequestResult
 from conftest import (
     FakeGuild,
     FakeInteraction,
@@ -47,6 +49,73 @@ async def test_play_rejects_user_outside_voice(monkeypatch) -> None:
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
+async def test_join_rejects_dm() -> None:
+    interaction = FakeInteraction(guild=None)
+
+    await commands.join_impl(interaction)
+
+    assert last_response_text(interaction) == "This command can only be used in a server."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+
+
+async def test_join_rejects_user_outside_voice(monkeypatch) -> None:
+    interaction = FakeInteraction(guild=FakeGuild(), user=object())
+
+    await commands.join_impl(interaction)
+
+    assert last_response_text(interaction) == "Join a voice channel first."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+
+
+async def test_join_rejects_missing_voice_permissions_before_defer(monkeypatch) -> None:
+    guild = FakeGuild()
+    voice_channel = FakeVoiceChannel(
+        guild=guild,
+        permissions=SimpleNamespace(view_channel=True, connect=False, speak=False),
+        name="kassu bot testing",
+    )
+    interaction = FakeInteraction(guild=guild)
+
+    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
+
+    await commands.join_impl(interaction)
+
+    assert last_response_text(interaction) == "I need Connect and Speak permissions in kassu bot testing."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.response.deferred is False
+    assert voice_channel.connect_kwargs is None
+
+
+async def test_join_connects_and_creates_idle_display(monkeypatch) -> None:
+    guild = FakeGuild()
+    channel = FakeTextChannel()
+    interaction = FakeInteraction(guild=guild, channel=channel, user=FakeMember(name="ada"))
+    voice_channel = object()
+    player = FakePlayer(guild=guild)
+    calls = []
+
+    async def fake_ensure_player(seen_guild, seen_channel):
+        assert seen_guild is guild
+        assert seen_channel is voice_channel
+        return player
+
+    async def fake_create_display(guild_id, seen_channel, seen_player, *, manage_refresh=True):
+        calls.append((guild_id, seen_channel, seen_player, manage_refresh))
+
+    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
+    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(commands, "create_or_update_display", fake_create_display)
+
+    await commands.join_impl(interaction)
+
+    assert interaction.response.deferred is True
+    assert interaction.response.defer_kwargs == {"ephemeral": True, "thinking": True}
+    assert get_guild_state(guild.id).text_channel is channel
+    assert calls == [(guild.id, channel, player, True)]
+    assert interaction.deleted_original_response is True
+    assert_no_text_response(interaction)
+
+
 async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> None:
     guild = FakeGuild()
     channel = FakeTextChannel()
@@ -61,10 +130,12 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
         assert seen_channel is voice_channel
         return player
 
-    async def fake_load_tracks(query: str, requester: str):
+    async def fake_queue_track_request(seen_player, query: str, requester: str):
+        assert seen_player is player
         assert query == "daft punk"
         assert requester == "ada"
-        return [track], LoadSummary("One More Time", 1, "youtube")
+        player.current = track
+        return TrackRequestResult([track], LoadSummary("One More Time", 1, "youtube"), True)
 
     async def fake_create_display(guild_id, seen_channel, seen_player, *, manage_refresh=True):
         calls.display.append((guild_id, seen_channel, seen_player, manage_refresh))
@@ -76,7 +147,7 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
 
     monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
     monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
-    monkeypatch.setattr(commands, "load_tracks", fake_load_tracks)
+    monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(commands, "create_or_update_display", fake_create_display)
     monkeypatch.setattr(commands.asyncio, "create_task", fake_create_task)
 
@@ -104,6 +175,7 @@ async def test_play_reports_connection_failure(monkeypatch) -> None:
 
     assert last_response_text(interaction) == "Could not connect to voice: voice denied"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_play_rejects_missing_voice_permissions_before_defer(monkeypatch) -> None:
@@ -132,17 +204,18 @@ async def test_play_reports_load_failure(monkeypatch) -> None:
     async def fake_ensure_player(guild, channel):
         return player
 
-    async def fake_load_tracks(query: str, requester: str):
-        raise RuntimeError("source down")
+    async def fake_queue_track_request(player, query: str, requester: str):
+        raise TrackRequestLoadError("source down")
 
     monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
     monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
-    monkeypatch.setattr(commands, "load_tracks", fake_load_tracks)
+    monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
 
     await commands.play_impl(interaction, "song")
 
     assert last_response_text(interaction) == "Could not load that request: source down"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_play_reports_playback_start_failure(monkeypatch) -> None:
@@ -152,21 +225,39 @@ async def test_play_reports_playback_start_failure(monkeypatch) -> None:
     async def fake_ensure_player(guild, channel):
         return player
 
-    async def fake_load_tracks(query: str, requester: str):
-        return [FakeTrack("Track")], LoadSummary("Track", 1, "youtube")
-
-    async def fake_add_tracks(player, tracks):
-        raise RuntimeError("queue rejected")
+    async def fake_queue_track_request(player, query: str, requester: str):
+        raise TrackRequestPlaybackError("queue rejected")
 
     monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
     monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
-    monkeypatch.setattr(commands, "load_tracks", fake_load_tracks)
-    monkeypatch.setattr(commands, "add_tracks", fake_add_tracks)
+    monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
 
     await commands.play_impl(interaction, "song")
 
     assert last_response_text(interaction) == "Could not start playback: queue rejected"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
+
+
+async def test_play_reports_empty_results_and_clears_deferred_response(monkeypatch) -> None:
+    interaction = FakeInteraction(guild=FakeGuild())
+    player = FakePlayer(guild=interaction.guild, playing=False)
+
+    async def fake_ensure_player(guild, channel):
+        return player
+
+    async def fake_queue_track_request(player, query: str, requester: str):
+        return TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False)
+
+    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
+    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
+
+    await commands.play_impl(interaction, "song")
+
+    assert last_response_text(interaction) == "No playable tracks were found."
+    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.deleted_original_response is True
 
 
 async def test_empty_state_commands_respond_ephemerally(monkeypatch) -> None:
