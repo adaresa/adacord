@@ -554,8 +554,8 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
         max_length=500,
     )
     play_next = discord.ui.TextInput(
-        label="Play next?",
-        placeholder="Leave empty, or type y/yes to put first in queue",
+        label="Play next? (optional)",
+        placeholder="Type yes to put this first",
         required=False,
         max_length=8,
     )
