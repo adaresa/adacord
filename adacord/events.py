@@ -22,6 +22,6 @@ async def handle_track_start(payload: wavelink.TrackStartEventPayload) -> None:
 
 
 async def handle_inactive_player(player: wavelink.Player) -> None:
-    await update_display_for_guild(player.guild.id, player)
+    await update_display_for_guild(player.guild.id, None)
     await clear_saved_guild_state(player.guild.id)
 

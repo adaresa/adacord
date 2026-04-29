@@ -44,6 +44,7 @@ PLAYER_ACCENTS = {
     "paused": 0xEAB308,
 }
 DISPLAY_REFRESH_INTERVAL = 1.0
+IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
 
 
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
@@ -259,6 +260,8 @@ class PlayerPanelView(discord.ui.LayoutView):
         ]
         if self.model.requester:
             header.append(f"Requested by: {self.model.requester}")
+        if self.model.state == "idle":
+            header.append("Idle in voice. Use `/dc` to leave.")
 
         summary = [
             f"Volume: {self.model.volume}%",
@@ -587,6 +590,14 @@ def should_refresh_progress(player: wavelink.Player | None) -> bool:
     return bool(player and player.current and not player.paused)
 
 
+def should_maintain_display(player: wavelink.Player | None) -> bool:
+    return bool(player and getattr(player, "connected", True))
+
+
+def display_refresh_interval(player: wavelink.Player | None) -> float:
+    return DISPLAY_REFRESH_INTERVAL if should_refresh_progress(player) else IDLE_DISPLAY_REFRESH_INTERVAL
+
+
 def stop_display_refresh(guild_id: int) -> None:
     state = get_guild_state(guild_id)
     task = state.display_refresh_task
@@ -597,7 +608,7 @@ def stop_display_refresh(guild_id: int) -> None:
 
 def ensure_display_refresh(guild_id: int, player: wavelink.Player | None) -> None:
     state = get_guild_state(guild_id)
-    if not should_refresh_progress(player) or not state.display_channel:
+    if not should_maintain_display(player) or not state.display_channel:
         stop_display_refresh(guild_id)
         return
 
@@ -609,10 +620,10 @@ def ensure_display_refresh(guild_id: int, player: wavelink.Player | None) -> Non
 
 async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> None:
     try:
-        while should_refresh_progress(player):
-            await asyncio.sleep(DISPLAY_REFRESH_INTERVAL)
+        while should_maintain_display(player):
+            await asyncio.sleep(display_refresh_interval(player))
             state = get_guild_state(guild_id)
-            if not state.display_channel or not should_refresh_progress(player):
+            if not state.display_channel or not should_maintain_display(player):
                 break
             await create_or_update_display(
                 guild_id,
@@ -648,31 +659,31 @@ async def create_or_update_display(
         logger.exception("Failed to load song recommendations")
         suggestions = ()
     view = PlayerPanelView(guild_id, build_player_panel_model(player, guild_id, suggestions))
+    state.display_channel = channel
+    state.display_channel_id = getattr(channel, "id", None)
 
     try:
         if state.display_message:
             if display_message_uses_v2(state.display_message):
                 try:
                     await state.display_message.edit(view=view)
-                    state.display_channel = channel
-                    state.display_channel_id = getattr(channel, "id", None)
                     state.display_message_id = getattr(state.display_message, "id", None)
                     if manage_refresh:
                         ensure_display_refresh(guild_id, player)
                     return state.display_message
                 except (discord.NotFound, discord.HTTPException):
                     state.display_message = None
+                    state.display_message_id = None
             else:
                 try:
                     await state.display_message.delete()
-                except discord.HTTPException:
+                except (discord.NotFound, discord.HTTPException):
                     pass
                 state.display_message = None
+                state.display_message_id = None
 
         message = await channel.send(view=view)
         state.display_message = message
-        state.display_channel = channel
-        state.display_channel_id = getattr(channel, "id", None)
         state.display_message_id = getattr(message, "id", None)
         if manage_refresh:
             ensure_display_refresh(guild_id, player)
@@ -689,18 +700,45 @@ async def update_display_for_guild(
     manage_refresh: bool = True,
 ) -> None:
     state = get_guild_state(guild_id)
-    has_music = bool(player and (player.current or not player.queue.is_empty))
-    if state.display_channel and has_music:
+    if should_maintain_display(player) and state.display_channel:
         await create_or_update_display(guild_id, state.display_channel, player, manage_refresh=manage_refresh)
-    elif state.display_message and not has_music:
+    elif should_maintain_display(player):
+        ensure_display_refresh(guild_id, player)
+    else:
         stop_display_refresh(guild_id)
-        try:
-            await state.display_message.delete()
-        except discord.HTTPException:
-            pass
+        if state.display_message:
+            try:
+                await state.display_message.delete()
+            except (discord.NotFound, discord.HTTPException):
+                pass
         state.display_message = None
         state.display_channel = None
         state.display_channel_id = None
         state.display_message_id = None
-    else:
-        ensure_display_refresh(guild_id, player)
+
+
+def display_message_matches(state, message_id: int) -> bool:
+    return state.display_message_id == message_id or getattr(state.display_message, "id", None) == message_id
+
+
+async def handle_display_message_delete(
+    guild_id: int,
+    channel_id: int | None,
+    message_id: int,
+    player: wavelink.Player | None,
+) -> None:
+    state = get_guild_state(guild_id)
+    if not display_message_matches(state, message_id):
+        return
+    if state.display_channel_id and channel_id and state.display_channel_id != channel_id:
+        return
+
+    channel = state.display_channel
+    state.display_message = None
+    state.display_message_id = None
+
+    if should_maintain_display(player) and channel:
+        await create_or_update_display(guild_id, channel, player)
+    elif not should_maintain_display(player):
+        state.display_channel = None
+        state.display_channel_id = None
