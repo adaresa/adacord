@@ -433,10 +433,11 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     updates = []
     backgrounds = []
 
-    async def fake_queue_track_request(seen_player, query, requester):
+    async def fake_queue_track_request(seen_player, query, requester, *, play_first=False):
         assert seen_player is player
         assert query == "daft punk"
         assert requester == "tester"
+        assert play_first is False
         player.current = track
         return TrackRequestResult([track], LoadSummary("One More Time", 1, "youtube"), True)
 
@@ -468,6 +469,61 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     assert len(backgrounds) == 1
 
 
+async def test_add_song_modal_accepts_yes_for_play_next(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Queued")]))
+    calls = []
+
+    async def fake_queue_track_request(seen_player, query, requester, *, play_first=False):
+        calls.append((seen_player, query, requester, play_first))
+        return TrackRequestResult([FakeTrack("Next")], LoadSummary("Next", 1, "youtube"), False)
+
+    async def fake_update(guild_id, seen_player, *, manage_refresh=True):
+        return None
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+
+    modal = ui.AddSongModal(player.guild.id)
+    modal.query._value = "daft punk"
+    modal.play_next._value = "yes"
+    interaction = FakeInteraction(guild=player.guild)
+
+    await modal.on_submit(interaction)
+
+    assert calls == [(player, "daft punk", "tester", True)]
+    assert interaction.response.deferred is True
+    assert_no_text_response(interaction)
+
+
+async def test_add_song_modal_rejects_invalid_play_next_value(monkeypatch) -> None:
+    calls = []
+    player = FakePlayer()
+
+    async def fake_queue_track_request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return TrackRequestResult([FakeTrack("Track")], LoadSummary("Track", 1, "youtube"), False)
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
+
+    modal = ui.AddSongModal(player.guild.id)
+    modal.query._value = "daft punk"
+    modal.play_next._value = "soon"
+    interaction = FakeInteraction(guild=player.guild)
+
+    await modal.on_submit(interaction)
+
+    assert calls == []
+    assert last_response_text(interaction) == "Leave Play next empty, or type y/yes."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+
+
 async def test_add_song_modal_reports_no_player(monkeypatch) -> None:
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: None)
     modal = ui.AddSongModal(123)
@@ -483,7 +539,7 @@ async def test_add_song_modal_reports_no_player(monkeypatch) -> None:
 async def test_add_song_modal_reports_empty_results(monkeypatch) -> None:
     player = FakePlayer()
 
-    async def fake_queue_track_request(player, query, requester):
+    async def fake_queue_track_request(player, query, requester, *, play_first=False):
         return TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False)
 
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
@@ -503,7 +559,7 @@ async def test_add_song_modal_reports_load_and_playback_failures(monkeypatch) ->
     player = FakePlayer()
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
 
-    async def fail_load(player, query, requester):
+    async def fail_load(player, query, requester, *, play_first=False):
         raise TrackRequestLoadError("source down")
 
     modal = ui.AddSongModal(player.guild.id)
@@ -516,7 +572,7 @@ async def test_add_song_modal_reports_load_and_playback_failures(monkeypatch) ->
     assert last_response_text(interaction) == "Could not load that request: source down"
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
 
-    async def fail_playback(player, query, requester):
+    async def fail_playback(player, query, requester, *, play_first=False):
         raise TrackRequestPlaybackError("queue rejected")
 
     modal = ui.AddSongModal(player.guild.id)

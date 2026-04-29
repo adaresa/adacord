@@ -553,6 +553,12 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
         required=True,
         max_length=500,
     )
+    play_next = discord.ui.TextInput(
+        label="Play next?",
+        placeholder="Leave empty, or type y/yes to put first in queue",
+        required=False,
+        max_length=8,
+    )
 
     def __init__(self, guild_id: int):
         super().__init__(timeout=300)
@@ -564,6 +570,11 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
             await respond(interaction, "Type a song, URL, or playlist first.", ephemeral=True)
             return
 
+        play_first = play_next_requested(str(self.play_next.value or ""))
+        if play_first is None:
+            await respond(interaction, "Leave Play next empty, or type y/yes.", ephemeral=True)
+            return
+
         player = player_for_interaction(interaction)
         if not player:
             await respond(interaction, "Not connected.", ephemeral=True)
@@ -571,7 +582,7 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            result = await queue_track_request(player, query, str(interaction.user))
+            result = await queue_track_request(player, query, str(interaction.user), play_first=play_first)
         except TrackRequestLoadError as exc:
             logger.exception("Failed to load query %r from player panel", query)
             await respond(interaction, f"Could not load that request: {exc}", ephemeral=True)
@@ -588,6 +599,15 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
         await update_display_for_guild(self.guild_id, player, manage_refresh=False)
         await acknowledge(interaction)
         asyncio.create_task(refresh_display_with_recommendations(self.guild_id, player))
+
+
+def play_next_requested(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"y", "yes"}:
+        return True
+    return None
 
 
 class QueueView(discord.ui.View):

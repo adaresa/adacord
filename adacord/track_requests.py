@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import wavelink
 
 from adacord.persistence import save_player_state
-from adacord.player import add_tracks
+from adacord.player import add_tracks, play_next
 from adacord.recommendations import clear_guild_recommendation_cache
 from adacord.sources import LoadSummary, load_tracks
 
@@ -29,6 +29,8 @@ async def queue_track_request(
     player: wavelink.Player,
     query: str,
     requester: str,
+    *,
+    play_first: bool = False,
 ) -> TrackRequestResult:
     try:
         tracks, summary = await load_tracks(query, requester)
@@ -40,7 +42,13 @@ async def queue_track_request(
 
     was_idle = not player.current and player.queue.is_empty
     try:
-        await add_tracks(player, tracks)
+        if play_first and not was_idle:
+            for index, track in enumerate(tracks):
+                player.queue.put_at(index, track)
+            if not player.playing and not player.paused:
+                await play_next(player)
+        else:
+            await add_tracks(player, tracks)
     except Exception as exc:
         raise TrackRequestPlaybackError(str(exc)) from exc
 
