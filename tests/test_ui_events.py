@@ -453,7 +453,7 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
     monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
 
-    modal = ui.AddSongModal(player.guild.id)
+    modal = ui.AddSongModal(999)
     modal.query._value = "daft punk"
     interaction = FakeInteraction(guild=player.guild)
 
@@ -464,7 +464,7 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     assert interaction.response.defer_kwargs == {"ephemeral": True, "thinking": True}
     assert interaction.deleted_original_response is True
     assert_no_text_response(interaction)
-    assert updates == [(player.guild.id, player, False)]
+    assert updates == [(999, player, False)]
     assert len(backgrounds) == 1
 
 

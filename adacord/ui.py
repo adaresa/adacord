@@ -585,9 +585,9 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
             await respond(interaction, "No playable tracks were found.", ephemeral=True)
             return
 
-        await update_display_for_guild(player.guild.id, player, manage_refresh=False)
+        await update_display_for_guild(self.guild_id, player, manage_refresh=False)
         await acknowledge(interaction)
-        asyncio.create_task(refresh_display_with_recommendations(player.guild.id, player))
+        asyncio.create_task(refresh_display_with_recommendations(self.guild_id, player))
 
 
 class QueueView(discord.ui.View):

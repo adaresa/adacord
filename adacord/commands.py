@@ -19,18 +19,12 @@ from adacord.ui import (
     acknowledge,
     create_or_update_display,
     player_for_interaction,
+    refresh_display_with_recommendations,
     respond,
     update_display_for_guild,
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def refresh_display_with_recommendations(guild_id: int, player) -> None:
-    try:
-        await update_display_for_guild(guild_id, player)
-    except Exception:
-        logger.exception("Failed to refresh player display with recommendations")
 
 
 def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
