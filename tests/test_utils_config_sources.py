@@ -108,6 +108,39 @@ def test_display_title_keeps_requested_variant_visible(fake_track_factory) -> No
     assert display_track_title(track, "rockefeller street") == "Rockefeller Street"
 
 
+def test_display_title_removes_youtube_channel_prefixes(fake_track_factory) -> None:
+    uploads = [
+        (
+            fake_track_factory("Martin Garrix & Bebe Rexha - In The Name Of Love (Lyrics)", author="7clouds"),
+            "Martin Garrix & Bebe Rexha - In The Name Of Love",
+        ),
+        (
+            fake_track_factory("Halsey - Without Me (Lyrics)", author="Creative Chaos and 2 more"),
+            "Halsey - Without Me",
+        ),
+        (
+            fake_track_factory(
+                """The Chainsmokers - Don't Let Me Down (Lyrics) | "I need you right now" """,
+                author="ChillTracks",
+            ),
+            "The Chainsmokers - Don't Let Me Down",
+        ),
+        (
+            fake_track_factory("Daft Punk - One More Time [Official Audio]", author="Uploader"),
+            "Daft Punk - One More Time",
+        ),
+    ]
+
+    for track, expected in uploads:
+        assert display_track_title(track, "search terms") == expected
+
+
+def test_display_title_still_prepends_official_artist_metadata(fake_track_factory) -> None:
+    track = fake_track_factory("One More Time", author="Daft Punk - Topic")
+
+    assert display_track_title(track, "daft punk one more time") == "Daft Punk - One More Time"
+
+
 def test_track_extras_support_dict_and_attribute_access(fake_track_factory) -> None:
     dict_track = fake_track_factory("Fallback")
     dict_track.extras = {"requester": "ada", "display_title": "Custom dict title"}

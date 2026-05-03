@@ -72,6 +72,19 @@ def requested_display_variants(query: str) -> list[str]:
     return sorted(term for term in AVOID_TERMS if text_contains_term(query_text, term))
 
 
+GENERIC_TITLE_DECORATION_RE = re.compile(
+    r"\s*[\(\[]\s*"
+    r"(?:official\s+)?(?:lyrics?|lyric\s+video|audio|music\s+video|visuali[sz]er)"
+    r"\s*[\)\]]\s*",
+    flags=re.IGNORECASE,
+)
+TRAILING_GENERIC_TITLE_RE = re.compile(
+    r"\s+(?:official\s+)?(?:lyrics?|lyric\s+video|audio)\s*$",
+    flags=re.IGNORECASE,
+)
+ARTIST_TITLE_SEPARATOR_RE = re.compile(r"\s+-\s+")
+
+
 def display_track_author(track: object) -> str:
     author = str(getattr(track, "author", "") or "").strip()
     for suffix in (" - Topic", "VEVO"):
@@ -80,10 +93,27 @@ def display_track_author(track: object) -> str:
     return author
 
 
+def clean_track_title(title: str) -> str:
+    title = str(title or "Unknown track").strip()
+    if "|" in title:
+        left, right = title.split("|", 1)
+        if re.search(r"['\"]", right) or re.search(
+            r"\blyrics?\b|\blyric\s+video\b",
+            left,
+            flags=re.IGNORECASE,
+        ):
+            title = left.strip()
+
+    title = GENERIC_TITLE_DECORATION_RE.sub(" ", title)
+    title = TRAILING_GENERIC_TITLE_RE.sub("", title)
+    return re.sub(r"\s+", " ", title).strip(" -") or "Unknown track"
+
+
 def display_track_title(track: object, query: str | None = None) -> str:
-    title = getattr(track, "title", "") or "Unknown track"
+    title = clean_track_title(getattr(track, "title", "") or "Unknown track")
     author = display_track_author(track)
-    if author and normalized_words(author) - normalized_words(title):
+    has_artist_title_separator = ARTIST_TITLE_SEPARATOR_RE.search(title)
+    if author and not has_artist_title_separator and normalized_words(author) - normalized_words(title):
         title = f"{author} - {title}"
 
     if not query:
