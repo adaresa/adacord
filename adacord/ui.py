@@ -751,7 +751,9 @@ async def fetch_display_message(
         logger.warning("Could not fetch display message %s before refresh", message_id)
         return None, False
 
-    return (message, True) if is_player_panel_message(message) else (None, True)
+    if is_bot_authored_message(message) and is_player_panel_message(message):
+        return message, True
+    return None, True
 
 
 async def recent_display_messages(channel: discord.abc.Messageable) -> tuple[list[discord.Message], bool]:

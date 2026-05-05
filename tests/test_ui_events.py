@@ -312,6 +312,29 @@ async def test_create_or_update_display_recovers_saved_display_by_id() -> None:
     assert message.edits[-1]["view"].has_components_v2()
 
 
+async def test_create_or_update_display_ignores_non_bot_saved_display_message() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    message = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)),
+        author=SimpleNamespace(bot=False),
+    )
+    message.id = 456
+    channel.messages_by_id[message.id] = message
+    state.display_message = None
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+
+    created = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert created is channel.sent[0]
+    assert message.edits == []
+    assert state.display_message is created
+    assert state.display_message_id == created.id
+
+
 async def test_create_or_update_display_scans_history_and_cleans_duplicate_panels() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
