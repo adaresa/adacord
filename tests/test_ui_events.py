@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import discord
@@ -50,6 +51,22 @@ class FakeTask:
 class MissingOnEditMessage(FakeMessage):
     async def edit(self, **kwargs):
         raise discord.HTTPException(SimpleNamespace(status=404, reason="Missing"), "message missing")
+
+
+class TransientOnEditMessage(FakeMessage):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.edit_attempts = 0
+
+    async def edit(self, **kwargs):
+        self.edit_attempts += 1
+        raise discord.HTTPException(SimpleNamespace(status=500, reason="Temporary"), "temporary failure")
+
+
+class SlowTextChannel(FakeTextChannel):
+    async def send(self, content: str | None = None, **kwargs):
+        await asyncio.sleep(0)
+        return await super().send(content, **kwargs)
 
 
 def test_build_player_panel_model_for_idle_state() -> None:
@@ -269,6 +286,96 @@ async def test_create_or_update_display_recreates_missing_v2_message() -> None:
     assert state.display_message_id == message.id
     assert state.display_channel is channel
     assert state.display_channel_id == channel.id
+
+
+async def test_create_or_update_display_recovers_saved_display_by_id() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    message = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    message.id = 456
+    channel.messages_by_id[message.id] = message
+    state.display_message = None
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+
+    recovered = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert recovered is message
+    assert channel.fetches == [message.id]
+    assert channel.sent == []
+    assert state.display_message is message
+    assert state.display_message_id == message.id
+    assert message.edits[-1]["view"].has_components_v2()
+
+
+async def test_create_or_update_display_scans_history_and_cleans_duplicate_panels() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    newest = FakeMessage(view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)))
+    newest.id = 300
+    older = FakeMessage(view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)))
+    older.id = 200
+    user_panel = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)),
+        author=SimpleNamespace(bot=False),
+    )
+    user_panel.id = 100
+    channel.history_messages = [newest, user_panel, older]
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+
+    recovered = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert recovered is newest
+    assert channel.sent == []
+    assert newest.deleted is False
+    assert older.deleted is True
+    assert user_panel.deleted is False
+    assert state.display_message is newest
+    assert state.display_message_id == newest.id
+    assert newest.edits[-1]["view"].has_components_v2()
+
+
+async def test_create_or_update_display_retries_transient_edit_without_replacing(monkeypatch) -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    message = TransientOnEditMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+    monkeypatch.setattr(ui, "DISPLAY_EDIT_RETRY_DELAY", 0)
+
+    result = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert result is None
+    assert message.edit_attempts == ui.DISPLAY_EDIT_RETRIES
+    assert channel.sent == []
+    assert state.display_message is message
+    assert state.display_message_id == message.id
+
+
+async def test_concurrent_display_updates_send_only_one_panel() -> None:
+    channel = SlowTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+
+    first, second = await asyncio.gather(
+        ui.create_or_update_display(player.guild.id, channel, player),
+        ui.create_or_update_display(player.guild.id, channel, player),
+    )
+
+    assert first is channel.sent[0]
+    assert second is channel.sent[0]
+    assert len(channel.sent) == 1
+    assert len(channel.sent[0].edits) == 1
 
 
 def test_display_refresh_starts_reuses_and_stops(monkeypatch) -> None:
