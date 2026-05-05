@@ -47,6 +47,9 @@ PLAYER_ACCENTS = {
 }
 DISPLAY_REFRESH_INTERVAL = 1.0
 IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
+DISPLAY_LOOKUP_HISTORY_LIMIT = 50
+DISPLAY_EDIT_RETRIES = 3
+DISPLAY_EDIT_RETRY_DELAY = 0.5
 
 
 async def refresh_display_with_recommendations(guild_id: int, player: wavelink.Player) -> None:
@@ -688,6 +691,144 @@ def display_message_uses_v2(message: discord.Message) -> bool:
     return bool(flags and getattr(flags, "components_v2", False))
 
 
+def is_missing_message_error(exc: discord.HTTPException) -> bool:
+    if isinstance(exc, discord.NotFound):
+        return True
+    status = getattr(exc, "status", None)
+    response = getattr(exc, "response", None)
+    return status == 404 or getattr(response, "status", None) == 404
+
+
+def iter_component_children(component: object):
+    yield component
+    for attr in ("children", "components", "items"):
+        children = getattr(component, attr, None)
+        if not children:
+            continue
+        for child in children:
+            yield from iter_component_children(child)
+
+
+def message_control_ids(message: discord.Message) -> set[str]:
+    control_ids = set()
+    view = getattr(message, "view", None)
+    if view and hasattr(view, "walk_children"):
+        control_ids.update(
+            str(item.custom_id)
+            for item in view.walk_children()
+            if getattr(item, "custom_id", None)
+        )
+
+    for component in getattr(message, "components", None) or ():
+        for item in iter_component_children(component):
+            custom_id = getattr(item, "custom_id", None)
+            if custom_id:
+                control_ids.add(str(custom_id))
+    return control_ids
+
+
+def is_player_panel_message(message: discord.Message) -> bool:
+    return bool(set(PLAYER_CONTROL_IDS.values()) & message_control_ids(message))
+
+
+def is_bot_authored_message(message: discord.Message) -> bool:
+    author = getattr(message, "author", None)
+    return bool(author and getattr(author, "bot", False))
+
+
+async def fetch_display_message(
+    channel: discord.abc.Messageable,
+    message_id: int | None,
+) -> tuple[discord.Message | None, bool]:
+    if not message_id or not hasattr(channel, "fetch_message"):
+        return None, True
+
+    try:
+        message = await channel.fetch_message(message_id)
+    except discord.HTTPException as exc:
+        if is_missing_message_error(exc):
+            return None, True
+        logger.warning("Could not fetch display message %s before refresh", message_id)
+        return None, False
+
+    if is_bot_authored_message(message) and is_player_panel_message(message):
+        return message, True
+    return None, True
+
+
+async def recent_display_messages(channel: discord.abc.Messageable) -> tuple[list[discord.Message], bool]:
+    if not hasattr(channel, "history"):
+        return [], True
+
+    try:
+        messages = [
+            message
+            async for message in channel.history(limit=DISPLAY_LOOKUP_HISTORY_LIMIT)
+            if is_bot_authored_message(message) and is_player_panel_message(message)
+        ]
+    except discord.HTTPException:
+        logger.warning("Could not scan recent messages for existing display panel")
+        return [], False
+    return messages, True
+
+
+async def delete_display_message(message: discord.Message) -> None:
+    try:
+        await message.delete()
+    except discord.HTTPException as exc:
+        if not is_missing_message_error(exc):
+            logger.warning("Could not delete duplicate display message %s", getattr(message, "id", None))
+
+
+async def resolve_existing_display(
+    state: GuildState,
+    channel: discord.abc.Messageable,
+) -> tuple[discord.Message | None, bool]:
+    if state.display_message:
+        return state.display_message, True
+
+    message, resolved = await fetch_display_message(channel, state.display_message_id)
+    if not resolved:
+        return None, False
+    if message:
+        state.display_message = message
+        state.display_message_id = getattr(message, "id", None)
+        return message, True
+
+    messages, resolved = await recent_display_messages(channel)
+    if not resolved:
+        return None, False
+    if not messages:
+        return None, True
+
+    message = messages[0]
+    state.display_message = message
+    state.display_message_id = getattr(message, "id", None)
+    for duplicate in messages[1:]:
+        await delete_display_message(duplicate)
+    return message, True
+
+
+async def edit_display_message(
+    message: discord.Message,
+    view: PlayerPanelView,
+) -> tuple[discord.Message | None, str]:
+    for attempt in range(DISPLAY_EDIT_RETRIES):
+        try:
+            edited = await message.edit(view=view)
+            return edited or message, "edited"
+        except discord.HTTPException as exc:
+            if is_missing_message_error(exc):
+                return None, "missing"
+            if attempt < DISPLAY_EDIT_RETRIES - 1:
+                await asyncio.sleep(DISPLAY_EDIT_RETRY_DELAY)
+                continue
+            logger.warning("Could not edit display message %s after retries", getattr(message, "id", None))
+            return None, "transient"
+
+    return None, "transient"
+
+
 def should_refresh_progress(player: wavelink.Player | None) -> bool:
     return bool(player and player.current and not player.paused)
 
@@ -755,6 +896,18 @@ async def create_or_update_display(
     manage_refresh: bool = True,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
+    async with state.display_lock:
+        return await _create_or_update_display_locked(guild_id, channel, player, manage_refresh=manage_refresh)
+
+
+async def _create_or_update_display_locked(
+    guild_id: int,
+    channel: discord.abc.Messageable,
+    player: wavelink.Player | None,
+    *,
+    manage_refresh: bool = True,
+) -> discord.Message | None:
+    state = get_guild_state(guild_id)
     try:
         suggestions = await recommendations_for_player(player, allow_refresh=manage_refresh)
     except Exception:
@@ -765,24 +918,37 @@ async def create_or_update_display(
     state.display_channel_id = getattr(channel, "id", None)
 
     try:
-        if state.display_message:
-            if display_message_uses_v2(state.display_message):
-                try:
-                    await state.display_message.edit(view=view)
-                    state.display_message_id = getattr(state.display_message, "id", None)
+        message, resolved = await resolve_existing_display(state, channel)
+        if not resolved:
+            return None
+
+        for _ in range(2):
+            if not message:
+                break
+
+            if display_message_uses_v2(message):
+                edited, status = await edit_display_message(message, view)
+                if status == "edited" and edited:
+                    state.display_message = edited
+                    state.display_message_id = getattr(edited, "id", None)
                     if manage_refresh:
                         ensure_display_refresh(guild_id, player)
-                    return state.display_message
-                except (discord.NotFound, discord.HTTPException):
+                    return edited
+                if status == "transient":
+                    return None
+
+                if status == "missing":
                     state.display_message = None
                     state.display_message_id = None
-            else:
-                try:
-                    await state.display_message.delete()
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-                state.display_message = None
-                state.display_message_id = None
+                    message, resolved = await resolve_existing_display(state, channel)
+                    if not resolved:
+                        return None
+                    continue
+
+            await delete_display_message(message)
+            state.display_message = None
+            state.display_message_id = None
+            message = None
 
         message = await channel.send(view=view)
         state.display_message = message
@@ -790,6 +956,9 @@ async def create_or_update_display(
         if manage_refresh:
             ensure_display_refresh(guild_id, player)
         return message
+    except discord.HTTPException:
+        logger.exception("Failed to create or update music display")
+        return None
     except Exception:
         logger.exception("Failed to create or update music display")
         return None
@@ -802,21 +971,19 @@ async def update_display_for_guild(
     manage_refresh: bool = True,
 ) -> None:
     state = get_guild_state(guild_id)
-    if should_maintain_display(player) and state.display_channel:
-        await create_or_update_display(guild_id, state.display_channel, player, manage_refresh=manage_refresh)
-    elif should_maintain_display(player):
-        ensure_display_refresh(guild_id, player)
-    else:
-        stop_display_refresh(guild_id)
-        if state.display_message:
-            try:
-                await state.display_message.delete()
-            except (discord.NotFound, discord.HTTPException):
-                pass
-        state.display_message = None
-        state.display_channel = None
-        state.display_channel_id = None
-        state.display_message_id = None
+    async with state.display_lock:
+        if should_maintain_display(player) and state.display_channel:
+            await _create_or_update_display_locked(guild_id, state.display_channel, player, manage_refresh=manage_refresh)
+        elif should_maintain_display(player):
+            ensure_display_refresh(guild_id, player)
+        else:
+            stop_display_refresh(guild_id)
+            if state.display_message:
+                await delete_display_message(state.display_message)
+            state.display_message = None
+            state.display_channel = None
+            state.display_channel_id = None
+            state.display_message_id = None
 
 
 def display_message_matches(state: GuildState, message_id: int) -> bool:
@@ -830,18 +997,19 @@ async def handle_display_message_delete(
     player: wavelink.Player | None,
 ) -> None:
     state = get_guild_state(guild_id)
-    if not display_message_matches(state, message_id):
-        return
-    if state.display_channel_id and channel_id and state.display_channel_id != channel_id:
-        return
+    async with state.display_lock:
+        if not display_message_matches(state, message_id):
+            return
+        if state.display_channel_id and channel_id and state.display_channel_id != channel_id:
+            return
 
-    channel = state.display_channel
-    state.display_message = None
-    state.display_message_id = None
+        channel = state.display_channel
+        state.display_message = None
+        state.display_message_id = None
 
-    if should_maintain_display(player) and channel:
-        await create_or_update_display(guild_id, channel, player)
-    elif not should_maintain_display(player):
-        stop_display_refresh(guild_id)
-        state.display_channel = None
-        state.display_channel_id = None
+        if should_maintain_display(player) and channel:
+            await _create_or_update_display_locked(guild_id, channel, player)
+        elif not should_maintain_display(player):
+            stop_display_refresh(guild_id)
+            state.display_channel = None
+            state.display_channel_id = None

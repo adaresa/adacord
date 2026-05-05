@@ -226,7 +226,7 @@ class FakeVoiceChannel:
 
 
 class FakeMessage:
-    def __init__(self, content: str | None = None, *, embed=None, view=None):
+    def __init__(self, content: str | None = None, *, embed=None, view=None, author=None):
         self.content = content
         self.embed = embed
         self.view = view
@@ -234,6 +234,8 @@ class FakeMessage:
         self.deleted = False
         self.edits = []
         self.id = 789
+        self.author = author if author is not None else SimpleNamespace(bot=True)
+        self.components = []
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
@@ -249,17 +251,31 @@ class FakeMessage:
 class FakeTextChannel:
     def __init__(self):
         self.sent: list[FakeMessage] = []
+        self.history_messages: list[FakeMessage] = []
+        self.messages_by_id: dict[int, FakeMessage] = {}
+        self.fetches: list[int] = []
         self.id = 321
 
     async def send(self, content: str | None = None, **kwargs):
         message = FakeMessage(content, embed=kwargs.get("embed"), view=kwargs.get("view"))
+        message.id = 789 + len(self.sent)
         self.sent.append(message)
+        self.history_messages.insert(0, message)
+        self.messages_by_id[message.id] = message
         return message
 
     async def fetch_message(self, message_id: int):
+        self.fetches.append(message_id)
+        if message_id in self.messages_by_id:
+            return self.messages_by_id[message_id]
         message = FakeMessage()
         message.id = message_id
         return message
+
+    async def history(self, *, limit: int | None = None):
+        messages = self.history_messages[:limit]
+        for message in messages:
+            yield message
 
 
 class FakeResponse:
