@@ -1,6 +1,6 @@
 import re
 from collections.abc import Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 SPOTIFY_PLAYLIST_RE = re.compile(
     r"^https?://open\.spotify\.com/(?:intl-[a-z]{2}/)?playlist/([A-Za-z0-9]+)"
@@ -30,6 +30,24 @@ AVOID_TERMS = {
 
 def is_url(value: str) -> bool:
     return urlparse(value).scheme in {"http", "https"}
+
+
+def youtube_watch_url_without_playlist(value: str) -> str | None:
+    parsed = urlparse(value.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc.lower() not in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        return None
+    if parsed.path != "/watch":
+        return None
+
+    query = parse_qs(parsed.query)
+    video_ids = query.get("v")
+    if not video_ids or "list" not in query:
+        return None
+
+    clean_query = urlencode({"v": video_ids[0]})
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", clean_query, ""))
 
 
 def spotify_playlist_id(value: str) -> str | None:
