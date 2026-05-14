@@ -19,6 +19,7 @@ from adacord.utils import (
     requested_variant_terms,
     spotify_playlist_id,
     text_contains_term,
+    youtube_watch_url_without_playlist,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,15 @@ def choose_best_song_candidate(
 
 async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
     source = None if is_url(query) else wavelink.TrackSource.YouTubeMusic
-    found = await wavelink.Playable.search(query, source=source)
+    try:
+        found = await wavelink.Playable.search(query, source=source)
+    except Exception:
+        fallback_query = youtube_watch_url_without_playlist(query)
+        if not fallback_query:
+            raise
+        logger.info("Retrying YouTube watch URL without playlist parameters: %s", fallback_query)
+        found = await wavelink.Playable.search(fallback_query, source=source)
+        query = fallback_query
 
     if isinstance(found, wavelink.Playlist):
         tracks = list(found.tracks)

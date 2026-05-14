@@ -40,6 +40,7 @@ from adacord.utils import (
     spotify_playlist_id,
     track_display_title,
     track_requester,
+    youtube_watch_url_without_playlist,
 )
 from conftest import FakePlayer, FakeQueue, FakeTrack
 
@@ -62,6 +63,17 @@ def test_url_detection() -> None:
     assert is_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     assert is_url("http://example.com/audio")
     assert not is_url("daft punk one more time")
+
+
+def test_youtube_watch_url_without_playlist() -> None:
+    assert (
+        youtube_watch_url_without_playlist(
+            "https://www.youtube.com/watch?v=uwTw63tTNeI&list=PLDnafrUBAs3mUL4oQt4oaQGByc1OFXj0Y&index=7"
+        )
+        == "https://www.youtube.com/watch?v=uwTw63tTNeI"
+    )
+    assert youtube_watch_url_without_playlist("https://youtu.be/uwTw63tTNeI?list=abc") is None
+    assert youtube_watch_url_without_playlist("https://www.youtube.com/watch?v=uwTw63tTNeI") is None
 
 
 def test_spotify_playlist_id() -> None:
@@ -229,6 +241,34 @@ async def test_url_search_keeps_first_result(monkeypatch, fake_track_factory) ->
 
     assert await search_youtube("https://youtu.be/example", "tester") == [first]
     assert first.extras["requester"] == "tester"
+
+
+async def test_url_search_retries_youtube_watch_url_without_playlist(monkeypatch, fake_track_factory) -> None:
+    track = fake_track_factory("Direct video")
+    calls = []
+
+    async def fake_search(query: str, *, source=None):
+        calls.append((query, source))
+        if "list=" in query:
+            raise RuntimeError("playlist does not exist")
+        return [track]
+
+    monkeypatch.setattr(wavelink.Playable, "search", staticmethod(fake_search))
+
+    tracks = await search_youtube(
+        "https://www.youtube.com/watch?v=uwTw63tTNeI&list=PLDnafrUBAs3mUL4oQt4oaQGByc1OFXj0Y&index=7",
+        "tester",
+    )
+
+    assert tracks == [track]
+    assert calls == [
+        (
+            "https://www.youtube.com/watch?v=uwTw63tTNeI&list=PLDnafrUBAs3mUL4oQt4oaQGByc1OFXj0Y&index=7",
+            None,
+        ),
+        ("https://www.youtube.com/watch?v=uwTw63tTNeI", None),
+    ]
+    assert track.extras["query"] == "https://www.youtube.com/watch?v=uwTw63tTNeI"
 
 
 async def test_search_youtube_uses_youtube_music_for_terms(monkeypatch, fake_track_factory) -> None:
