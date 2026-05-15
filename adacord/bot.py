@@ -9,7 +9,13 @@ import wavelink
 
 from adacord.commands import setup_all_commands
 from adacord.config import discord_guild_id, discord_token
-from adacord.events import handle_inactive_player, handle_track_end, handle_track_start
+from adacord.events import (
+    handle_inactive_player,
+    handle_track_end,
+    handle_track_exception,
+    handle_track_start,
+    handle_track_stuck,
+)
 from adacord.player import connect_lavalink, get_player
 from adacord.recovery import restore_playback_state
 from adacord.ui import PlayerPanelView, handle_display_message_delete
@@ -130,15 +136,11 @@ def register_events(bot: AdacordBot) -> None:
 
     @bot.event
     async def on_wavelink_track_exception(payload: wavelink.TrackExceptionEventPayload) -> None:
-        logger.error("Lavalink track exception: %s", payload.exception)
-        if payload.player and not payload.player.queue.is_empty:
-            await handle_track_end(payload)
+        await handle_track_exception(payload)
 
     @bot.event
     async def on_wavelink_track_stuck(payload: wavelink.TrackStuckEventPayload) -> None:
-        logger.warning("Lavalink track stuck: %s", payload.track)
-        if payload.player and not payload.player.queue.is_empty:
-            await handle_track_end(payload)
+        await handle_track_stuck(payload)
 
     @bot.event
     async def on_wavelink_inactive_player(player: wavelink.Player) -> None:

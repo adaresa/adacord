@@ -81,6 +81,23 @@ Follow logs while testing playback:
 docker compose logs -f bot lavalink yt-cipher
 ```
 
+### Optional playback watchdog
+
+The default Lavalink healthcheck proves the HTTP service is alive. To also probe the real YouTube search path and restart the music stack after repeated failures, enable the optional watchdog profile:
+
+```env
+COMPOSE_PROFILES=watchdog
+```
+
+Then recreate the stack:
+
+```bash
+docker compose up -d
+docker compose logs -f watchdog lavalink bot
+```
+
+The watchdog runs `loadtracks` against Lavalink every few minutes. After repeated failed probes, it restarts `yt-cipher`, Lavalink, and the bot. It mounts `/var/run/docker.sock`, which gives that container permission to control Docker on the host, so only enable it on a server you control.
+
 ## Updating
 
 Pull the latest Compose file from the repo, then update the containers:
@@ -147,6 +164,7 @@ Run checks:
 python -m py_compile bot.py adacord/*.py tests/*.py
 python -m pytest
 docker compose config --no-interpolate
+COMPOSE_PROFILES=watchdog docker compose config --no-interpolate
 docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
 ```
 

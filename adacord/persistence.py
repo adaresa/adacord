@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 STATE_VERSION = 1
 state_lock = threading.Lock()
+DEFAULT_SNAPSHOT_VALUE = object()
 
 
 def state_path() -> Path:
@@ -116,21 +117,30 @@ def saved_tracks(tracks: list[object]) -> list[dict[str, Any]]:
     return [track_payload(track) for track in tracks]
 
 
-def player_state_snapshot(player: wavelink.Player | None) -> tuple[int, dict[str, Any] | None] | None:
+def player_state_snapshot(
+    player: wavelink.Player | None,
+    *,
+    current: Any = DEFAULT_SNAPSHOT_VALUE,
+    queued: Any = DEFAULT_SNAPSHOT_VALUE,
+    position: int | None = None,
+    paused: bool | None = None,
+) -> tuple[int, dict[str, Any] | None] | None:
     if not player:
         return None
 
-    current = player.current
-    queued = list(player.queue)
+    current_track = player.current if current is DEFAULT_SNAPSHOT_VALUE else current
+    queued_tracks = list(player.queue) if queued is DEFAULT_SNAPSHOT_VALUE else queued
     state = get_guild_state(player.guild.id)
 
-    if not current and not queued:
+    if not current_track and not queued_tracks:
         return player.guild.id, None
 
     channel = getattr(player, "channel", None)
     voice_channel_id = getattr(channel, "id", None) or state.voice_channel_id
     display_channel_id = state.display_channel_id or getattr(state.display_channel, "id", None)
     display_message_id = state.display_message_id or getattr(state.display_message, "id", None)
+    saved_position = player.position if position is None else position
+    saved_paused = bool(player.paused) if paused is None else paused
 
     return player.guild.id, {
         "guild_id": player.guild.id,
@@ -139,10 +149,10 @@ def player_state_snapshot(player: wavelink.Player | None) -> tuple[int, dict[str
         "display_message_id": display_message_id,
         "volume": player.volume,
         "loop_mode": state.loop_mode,
-        "paused": bool(player.paused),
-        "position": player.position,
-        "current": track_payload(current) if current else None,
-        "queue": saved_tracks(queued),
+        "paused": bool(saved_paused),
+        "position": saved_position,
+        "current": track_payload(current_track) if current_track else None,
+        "queue": saved_tracks(queued_tracks),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -162,6 +172,32 @@ def save_player_state_now(player: wavelink.Player | None) -> None:
 
 async def save_player_state(player: wavelink.Player | None) -> None:
     snapshot = player_state_snapshot(player)
+    if not snapshot:
+        return
+
+    guild_id, saved = snapshot
+    if saved is None:
+        await clear_guild_state(guild_id)
+        return
+
+    await asyncio.to_thread(save_guild_snapshot, guild_id, saved)
+
+
+async def save_preserved_player_state(
+    player: wavelink.Player,
+    *,
+    current: object | None,
+    queued: list[object],
+    position: int,
+    paused: bool,
+) -> None:
+    snapshot = player_state_snapshot(
+        player,
+        current=current,
+        queued=queued,
+        position=position,
+        paused=paused,
+    )
     if not snapshot:
         return
 

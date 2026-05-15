@@ -31,6 +31,14 @@ docker compose pull
 docker compose up -d
 ```
 
+Optional: enable the playback watchdog profile on small private servers where automatic recovery is worth mounting the Docker socket. Add this to `/opt/adacord/.env`:
+
+```bash
+COMPOSE_PROFILES=watchdog
+```
+
+The watchdog periodically asks Lavalink to perform a YouTube Music `loadtracks` search. If that playback-path probe fails repeatedly, it restarts `yt-cipher`, Lavalink, and the bot.
+
 ## GitHub Actions Secrets
 
 Create a dedicated SSH key for deployments. Add the public key to the server user's `~/.ssh/authorized_keys`, then add these repository secrets in GitHub:
@@ -119,6 +127,7 @@ Run static checks without starting a Discord session:
 python -m py_compile bot.py adacord/*.py tests/*.py
 python -m pytest
 docker compose config --no-interpolate
+COMPOSE_PROFILES=watchdog docker compose config --no-interpolate
 docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
 ```
 

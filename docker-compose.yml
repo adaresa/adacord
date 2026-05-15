@@ -31,6 +31,7 @@ services:
 
   bot:
     image: ghcr.io/adaresa/adacord:latest
+    container_name: adacord-bot
     env_file: .env
     volumes:
       - ./data:/app/data
@@ -38,3 +39,21 @@ services:
       lavalink:
         condition: service_healthy
     restart: unless-stopped
+
+  watchdog:
+    image: docker:27-cli
+    container_name: adacord-watchdog
+    profiles:
+      - watchdog
+    restart: unless-stopped
+    depends_on:
+      lavalink:
+        condition: service_healthy
+    environment:
+      LAVALINK_URL: http://lavalink:2333
+      LAVALINK_PASSWORD: adacord-internal-lavalink
+      LAVALINK_WATCHDOG_RESTART_CONTAINERS: "adacord-yt-cipher adacord-lavalink adacord-bot"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts/lavalink-watchdog.sh:/usr/local/bin/lavalink-watchdog.sh:ro
+    command: ["sh", "/usr/local/bin/lavalink-watchdog.sh"]
