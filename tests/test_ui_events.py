@@ -505,8 +505,27 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
     assert saves == [player]
 
 
-def test_active_display_refresh_interval_is_three_seconds() -> None:
-    assert ui.DISPLAY_REFRESH_INTERVAL == 3.0
+def test_active_display_refresh_interval_is_five_seconds() -> None:
+    assert ui.DISPLAY_REFRESH_INTERVAL == 5.0
+
+
+async def test_successful_display_edit_delays_automatic_refresh_budget() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    message = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    state = get_guild_state(player.guild.id)
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+
+    result = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert result is message
+    assert state.display_last_edit_at > 0
+    assert ui.display_auto_refresh_cooldown(player.guild.id) > 0
 
 
 async def test_progress_refresh_does_not_refresh_recommendations(monkeypatch) -> None:

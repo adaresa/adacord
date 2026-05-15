@@ -55,7 +55,7 @@ PLAYER_ACCENTS = {
     "playing": 0x22C55E,
     "paused": 0xEAB308,
 }
-DISPLAY_REFRESH_INTERVAL = 3.0
+DISPLAY_REFRESH_INTERVAL = 5.0
 IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
 DISPLAY_LOOKUP_HISTORY_LIMIT = 50
 DISPLAY_EDIT_RETRIES = 3
@@ -918,14 +918,27 @@ def record_display_rate_limit(guild_id: int, retry_after: float | None) -> None:
     state.display_rate_limit_until = max(state.display_rate_limit_until, loop.time() + retry_after)
 
 
-def display_refresh_delay(guild_id: int, player: wavelink.Player | None) -> float:
-    interval = display_refresh_interval(player)
+def record_display_edit(guild_id: int) -> None:
     state = get_guild_state(guild_id)
     try:
-        cooldown = state.display_rate_limit_until - asyncio.get_running_loop().time()
+        state.display_last_edit_at = asyncio.get_running_loop().time()
     except RuntimeError:
-        cooldown = 0.0
-    return max(interval, cooldown, 0.0)
+        state.display_last_edit_at = 0.0
+
+
+def display_auto_refresh_cooldown(guild_id: int) -> float:
+    state = get_guild_state(guild_id)
+    try:
+        now = asyncio.get_running_loop().time()
+    except RuntimeError:
+        return 0.0
+    rate_limit_delay = state.display_rate_limit_until - now
+    edit_reserve_delay = (state.display_last_edit_at + DISPLAY_REFRESH_INTERVAL) - now
+    return max(rate_limit_delay, edit_reserve_delay, 0.0)
+
+
+def display_refresh_delay(guild_id: int, player: wavelink.Player | None) -> float:
+    return max(display_refresh_interval(player), display_auto_refresh_cooldown(guild_id))
 
 
 def stop_display_refresh(guild_id: int) -> None:
@@ -955,6 +968,12 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
             state = get_guild_state(guild_id)
             if not state.display_channel or not should_maintain_display(player):
                 break
+            extra_delay = display_auto_refresh_cooldown(guild_id)
+            if extra_delay:
+                await asyncio.sleep(extra_delay)
+                state = get_guild_state(guild_id)
+                if not state.display_channel or not should_maintain_display(player):
+                    break
             if should_refresh_progress(player):
                 await save_player_state(player)
             await create_or_update_display(
@@ -1018,6 +1037,7 @@ async def _create_or_update_display_locked(
             if display_message_uses_v2(message):
                 edited, status = await edit_display_message(guild_id, message, view)
                 if status == "edited" and edited:
+                    record_display_edit(guild_id)
                     state.display_message = edited
                     state.display_message_id = getattr(edited, "id", None)
                     if manage_refresh:
@@ -1040,6 +1060,7 @@ async def _create_or_update_display_locked(
             message = None
 
         message = await channel.send(view=view)
+        record_display_edit(guild_id)
         state.display_message = message
         state.display_message_id = getattr(message, "id", None)
         if manage_refresh:
