@@ -157,7 +157,7 @@ def register_events(bot: AdacordBot) -> None:
         if not bot.user or member.id != bot.user.id:
             return
         if before.channel and not after.channel and member.guild:
-            await handle_bot_voice_disconnect(bot, member.guild.id)
+            await handle_bot_voice_disconnect(bot, member.guild.id, get_player(member.guild))
 
     @bot.event
     async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:

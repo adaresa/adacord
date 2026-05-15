@@ -68,7 +68,14 @@ async def reconnect_saved_voice_playback(bot: commands.Bot, guild_id: int, saved
     logger.error("Could not reconnect saved voice playback for guild %s: %s", guild_id, last_error)
 
 
-async def handle_bot_voice_disconnect(bot: commands.Bot, guild_id: int) -> None:
+async def handle_bot_voice_disconnect(
+    bot: commands.Bot,
+    guild_id: int,
+    player: wavelink.Player | None = None,
+) -> None:
+    if player and (player.current or not player.queue.is_empty):
+        await save_player_state(player)
+
     saved = saved_playback_for_guild(guild_id)
     if not saved:
         return
