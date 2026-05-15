@@ -10,6 +10,7 @@ import wavelink
 from adacord.commands import setup_all_commands
 from adacord.config import discord_guild_id, discord_token
 from adacord.events import (
+    handle_bot_voice_disconnect,
     handle_inactive_player,
     handle_track_end,
     handle_track_exception,
@@ -146,6 +147,17 @@ def register_events(bot: AdacordBot) -> None:
     async def on_wavelink_inactive_player(player: wavelink.Player) -> None:
         await handle_inactive_player(player)
         await player.disconnect()
+
+    @bot.event
+    async def on_voice_state_update(
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        if not bot.user or member.id != bot.user.id:
+            return
+        if before.channel and not after.channel and member.guild:
+            await handle_bot_voice_disconnect(bot, member.guild.id)
 
     @bot.event
     async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:

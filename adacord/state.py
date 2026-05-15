@@ -20,6 +20,8 @@ class GuildState:
     display_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     idle_task: asyncio.Task[None] | None = None
     display_refresh_task: asyncio.Task[None] | None = None
+    display_rate_limit_until: float = 0.0
+    voice_reconnect_task: asyncio.Task[None] | None = None
 
 
 guild_states: dict[int, GuildState] = {}

@@ -10,7 +10,17 @@ import wavelink
 
 from adacord.persistence import save_player_state
 from adacord.config import default_volume
-from adacord.player import add_tracks, clear_player, get_player, queue_items, set_loop_mode, set_volume
+from adacord.player import (
+    MissingVoicePermissions,
+    add_tracks,
+    clear_player,
+    ensure_player,
+    get_player,
+    queue_items,
+    set_loop_mode,
+    set_volume,
+    validate_voice_channel_permissions,
+)
 from adacord.recommendations import (
     RECOMMENDATION_REQUESTER,
     Recommendation,
@@ -45,7 +55,7 @@ PLAYER_ACCENTS = {
     "playing": 0x22C55E,
     "paused": 0xEAB308,
 }
-DISPLAY_REFRESH_INTERVAL = 5.0
+DISPLAY_REFRESH_INTERVAL = 3.0
 IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
 DISPLAY_LOOKUP_HISTORY_LIMIT = 50
 DISPLAY_EDIT_RETRIES = 3
@@ -63,6 +73,12 @@ def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player 
     if not interaction.guild:
         return None
     return get_player(interaction.guild)
+
+
+def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
+    user = getattr(interaction, "user", None)
+    voice = getattr(user, "voice", None)
+    return getattr(voice, "channel", None)
 
 
 async def respond(
@@ -113,6 +129,38 @@ async def respond_and_clear_deferred(
         pass
     except discord.HTTPException:
         logger.exception("Failed to delete deferred interaction response")
+
+
+async def connect_for_player_panel(interaction: discord.Interaction) -> wavelink.Player | None:
+    if not interaction.guild:
+        await respond(interaction, "This action can only be used in a server.", ephemeral=True)
+        return None
+
+    channel = user_voice_channel(interaction)
+    if not channel:
+        await respond(interaction, "Join a voice channel first.", ephemeral=True)
+        return None
+
+    try:
+        validate_voice_channel_permissions(interaction.guild, channel)
+    except MissingVoicePermissions as exc:
+        await respond(interaction, str(exc), ephemeral=True)
+        return None
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        player = await ensure_player(interaction.guild, channel)
+    except MissingVoicePermissions as exc:
+        await respond_and_clear_deferred(interaction, str(exc), ephemeral=True)
+        return None
+    except Exception as exc:
+        logger.exception("Failed to connect Lavalink player from player panel")
+        await respond_and_clear_deferred(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
+        return None
+
+    state = get_guild_state(interaction.guild.id)
+    state.text_channel = interaction.channel
+    return player
 
 
 @dataclass(frozen=True)
@@ -524,9 +572,8 @@ class PlayerPanelView(discord.ui.LayoutView):
         )
 
     async def add(self, interaction: discord.Interaction) -> None:
-        player = player_for_interaction(interaction)
-        if not player:
-            await respond(interaction, "Not connected.", ephemeral=True)
+        if not interaction.guild and not self.guild_id:
+            await respond(interaction, "This action can only be used in a server.", ephemeral=True)
             return
         await interaction.response.send_modal(AddSongModal(self.guild_id_for(interaction)))
 
@@ -594,11 +641,13 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
             return
 
         player = player_for_interaction(interaction)
-        if not player:
-            await respond(interaction, "Not connected.", ephemeral=True)
-            return
+        if not player or not getattr(player, "connected", True):
+            player = await connect_for_player_panel(interaction)
+            if not player:
+                return
+        elif not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             result = await queue_track_request(player, query, str(interaction.user), play_first=play_first)
         except TrackRequestLoadError as exc:
@@ -614,7 +663,10 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
             await respond_and_clear_deferred(interaction, "No playable tracks were found.", ephemeral=True)
             return
 
-        await update_display_for_guild(self.guild_id, player, manage_refresh=False)
+        if result.was_idle and interaction.channel:
+            await create_or_update_display(self.guild_id, interaction.channel, player, manage_refresh=False)
+        else:
+            await update_display_for_guild(self.guild_id, player, manage_refresh=False)
         await acknowledge(interaction)
         asyncio.create_task(refresh_display_with_recommendations(self.guild_id, player))
 
@@ -810,6 +862,7 @@ async def resolve_existing_display(
 
 
 async def edit_display_message(
+    guild_id: int,
     message: discord.Message,
     view: PlayerPanelView,
 ) -> tuple[discord.Message | None, str]:
@@ -820,6 +873,8 @@ async def edit_display_message(
         except discord.HTTPException as exc:
             if is_missing_message_error(exc):
                 return None, "missing"
+            if is_rate_limited_error(exc):
+                record_display_rate_limit(guild_id, retry_after_seconds(exc))
             if attempt < DISPLAY_EDIT_RETRIES - 1:
                 await asyncio.sleep(DISPLAY_EDIT_RETRY_DELAY)
                 continue
@@ -839,6 +894,38 @@ def should_maintain_display(player: wavelink.Player | None) -> bool:
 
 def display_refresh_interval(player: wavelink.Player | None) -> float:
     return DISPLAY_REFRESH_INTERVAL if should_refresh_progress(player) else IDLE_DISPLAY_REFRESH_INTERVAL
+
+
+def retry_after_seconds(exc: discord.HTTPException) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    value = headers.get("Retry-After") if headers else None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def is_rate_limited_error(exc: discord.HTTPException) -> bool:
+    return getattr(exc, "status", None) == 429
+
+
+def record_display_rate_limit(guild_id: int, retry_after: float | None) -> None:
+    if retry_after is None:
+        return
+    state = get_guild_state(guild_id)
+    loop = asyncio.get_running_loop()
+    state.display_rate_limit_until = max(state.display_rate_limit_until, loop.time() + retry_after)
+
+
+def display_refresh_delay(guild_id: int, player: wavelink.Player | None) -> float:
+    interval = display_refresh_interval(player)
+    state = get_guild_state(guild_id)
+    try:
+        cooldown = state.display_rate_limit_until - asyncio.get_running_loop().time()
+    except RuntimeError:
+        cooldown = 0.0
+    return max(interval, cooldown, 0.0)
 
 
 def stop_display_refresh(guild_id: int) -> None:
@@ -864,7 +951,7 @@ def ensure_display_refresh(guild_id: int, player: wavelink.Player | None) -> Non
 async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> None:
     try:
         while should_maintain_display(player):
-            await asyncio.sleep(display_refresh_interval(player))
+            await asyncio.sleep(display_refresh_delay(guild_id, player))
             state = get_guild_state(guild_id)
             if not state.display_channel or not should_maintain_display(player):
                 break
@@ -927,7 +1014,7 @@ async def _create_or_update_display_locked(
                 break
 
             if display_message_uses_v2(message):
-                edited, status = await edit_display_message(message, view)
+                edited, status = await edit_display_message(guild_id, message, view)
                 if status == "edited" and edited:
                     state.display_message = edited
                     state.display_message_id = getattr(edited, "id", None)
