@@ -476,9 +476,13 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
     state.display_channel = FakeTextChannel()
     calls = []
     delays = []
+    saves = []
 
     async def fake_sleep(delay):
         delays.append(delay)
+
+    async def fake_save(seen_player):
+        saves.append(seen_player)
 
     async def fake_create_or_update(guild_id, channel, seen_player, *, manage_refresh=True):
         calls.append((guild_id, channel, seen_player, manage_refresh))
@@ -488,6 +492,7 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
             seen_player.connected = False
 
     monkeypatch.setattr(ui.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(ui, "save_player_state", fake_save)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_or_update)
 
     await ui.refresh_display_progress(player.guild.id, player)
@@ -497,6 +502,7 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
         (player.guild.id, state.display_channel, player, False),
         (player.guild.id, state.display_channel, player, False),
     ]
+    assert saves == [player]
 
 
 def test_active_display_refresh_interval_is_three_seconds() -> None:

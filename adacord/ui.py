@@ -955,6 +955,8 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
             state = get_guild_state(guild_id)
             if not state.display_channel or not should_maintain_display(player):
                 break
+            if should_refresh_progress(player):
+                await save_player_state(player)
             await create_or_update_display(
                 guild_id,
                 state.display_channel,

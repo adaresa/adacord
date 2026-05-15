@@ -100,3 +100,34 @@ async def test_bot_voice_disconnect_schedules_reconnect_when_saved_music_exists(
 
     assert len(scheduled) == 1
     assert get_guild_state(guild.id).voice_reconnect_task is not None
+
+
+async def test_bot_voice_disconnect_saves_live_position_before_reconnect(monkeypatch) -> None:
+    guild = FakeGuild()
+    current = FakeTrack("Current")
+    current.position = 45_000
+    player = FakePlayer(guild=guild, current=current, playing=True)
+    saved = {"voice_channel_id": 456, "current": saved_track(current), "queue": [], "position": 45_000}
+    saves = []
+    scheduled = []
+
+    class FakeTask:
+        def done(self):
+            return False
+
+    async def fake_save(seen_player):
+        saves.append(seen_player.position)
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+        return FakeTask()
+
+    monkeypatch.setattr(events, "save_player_state", fake_save)
+    monkeypatch.setattr(events, "load_state", lambda: {"version": 1, "guilds": {str(guild.id): saved}})
+    monkeypatch.setattr(events.asyncio, "create_task", fake_create_task)
+
+    await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id, player)
+
+    assert saves == [45_000]
+    assert len(scheduled) == 1
