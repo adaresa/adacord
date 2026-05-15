@@ -11,7 +11,7 @@ from adacord.recommendations import Recommendation
 from adacord.sources import LoadSummary
 from adacord.state import get_guild_state, guild_states
 from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, TrackRequestResult
-from conftest import FakeInteraction, FakeMessage, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack
+from conftest import FakeInteraction, FakeMember, FakeMessage, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack, FakeVoiceChannel
 
 
 def embed_field(embed, name: str):
@@ -61,6 +61,12 @@ class TransientOnEditMessage(FakeMessage):
     async def edit(self, **kwargs):
         self.edit_attempts += 1
         raise discord.HTTPException(SimpleNamespace(status=500, reason="Temporary"), "temporary failure")
+
+
+class RateLimitedOnEditMessage(FakeMessage):
+    async def edit(self, **kwargs):
+        response = SimpleNamespace(status=429, reason="Rate Limited", headers={"Retry-After": "4.5"})
+        raise discord.HTTPException(response, {"message": "rate limited"})
 
 
 class SlowTextChannel(FakeTextChannel):
@@ -386,6 +392,26 @@ async def test_create_or_update_display_retries_transient_edit_without_replacing
     assert state.display_message_id == message.id
 
 
+async def test_rate_limited_display_edit_records_retry_after(monkeypatch) -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    message = RateLimitedOnEditMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    )
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+    monkeypatch.setattr(ui, "DISPLAY_EDIT_RETRY_DELAY", 0)
+
+    result = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert result is None
+    assert ui.display_refresh_delay(player.guild.id, player) >= 4.0
+    assert state.display_rate_limit_until > asyncio.get_running_loop().time()
+
+
 async def test_concurrent_display_updates_send_only_one_panel() -> None:
     channel = SlowTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
@@ -473,6 +499,10 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
     ]
 
 
+def test_active_display_refresh_interval_is_three_seconds() -> None:
+    assert ui.DISPLAY_REFRESH_INTERVAL == 3.0
+
+
 async def test_progress_refresh_does_not_refresh_recommendations(monkeypatch) -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"), playing=True)
@@ -557,6 +587,20 @@ async def test_player_panel_add_button_opens_modal(monkeypatch) -> None:
     assert interaction.response.modal.guild_id == player.guild.id
 
 
+async def test_player_panel_add_button_opens_modal_without_connected_player(monkeypatch) -> None:
+    guild = FakePlayer().guild
+    guild.voice_client = None
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: None)
+
+    view = ui.PlayerPanelView(guild.id, ui.build_player_panel_model(None, guild.id))
+    interaction = FakeInteraction(guild=guild)
+
+    await view.add(interaction)
+
+    assert isinstance(interaction.response.modal, ui.AddSongModal)
+    assert interaction.response.modal.guild_id == guild.id
+
+
 async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatch) -> None:
     player = FakePlayer(playing=False)
     track = FakeTrack("One More Time")
@@ -574,6 +618,9 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     async def fake_update(guild_id, seen_player, *, manage_refresh=True):
         updates.append((guild_id, seen_player, manage_refresh))
 
+    async def fake_create_display(guild_id, channel, seen_player, *, manage_refresh=True):
+        updates.append((guild_id, seen_player, manage_refresh))
+
     def fake_create_task(coro):
         backgrounds.append(coro)
         coro.close()
@@ -582,6 +629,7 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(ui, "create_or_update_display", fake_create_display)
     monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
 
     modal = ui.AddSongModal(999)
@@ -596,6 +644,50 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     assert interaction.deleted_original_response is True
     assert_no_text_response(interaction)
     assert updates == [(999, player, False)]
+    assert len(backgrounds) == 1
+
+
+async def test_add_song_modal_connects_like_play_when_player_missing(monkeypatch) -> None:
+    guild = FakePlayer().guild
+    guild.voice_client = None
+    player = FakePlayer(guild=guild, playing=False)
+    guild.voice_client = None
+    voice_channel = FakeVoiceChannel(guild=guild, player=player)
+    track = FakeTrack("One More Time")
+    updates = []
+    backgrounds = []
+
+    async def fake_queue_track_request(seen_player, query, requester, *, play_first=False):
+        assert seen_player is player
+        assert query == "daft punk"
+        assert requester == "tester"
+        player.current = track
+        return TrackRequestResult([track], LoadSummary("One More Time", 1, "youtube"), True)
+
+    async def fake_create_display(guild_id, channel, seen_player, *, manage_refresh=True):
+        updates.append((guild_id, channel, seen_player, manage_refresh))
+
+    def fake_create_task(coro):
+        backgrounds.append(coro)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
+    monkeypatch.setattr(ui, "create_or_update_display", fake_create_display)
+    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+
+    modal = ui.AddSongModal(guild.id)
+    modal.query._value = "daft punk"
+    interaction = FakeInteraction(guild=guild, user=FakeMember(voice_channel=voice_channel))
+
+    await modal.on_submit(interaction)
+
+    assert voice_channel.connect_kwargs is not None
+    assert guild.voice_client is player
+    assert player.current is track
+    assert interaction.response.deferred is True
+    assert interaction.deleted_original_response is True
+    assert updates == [(guild.id, interaction.channel, player, False)]
     assert len(backgrounds) == 1
 
 
@@ -654,7 +746,7 @@ async def test_add_song_modal_rejects_invalid_play_next_value(monkeypatch) -> No
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
-async def test_add_song_modal_reports_no_player(monkeypatch) -> None:
+async def test_add_song_modal_reports_user_outside_voice_when_player_missing(monkeypatch) -> None:
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: None)
     modal = ui.AddSongModal(123)
     modal.query._value = "daft punk"
@@ -662,7 +754,25 @@ async def test_add_song_modal_reports_no_player(monkeypatch) -> None:
 
     await modal.on_submit(interaction)
 
-    assert last_response_text(interaction) == "Not connected."
+    assert last_response_text(interaction) == "Join a voice channel first."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+
+
+async def test_add_song_modal_rejects_missing_voice_permissions_when_connecting(monkeypatch) -> None:
+    guild = FakePlayer().guild
+    guild.voice_client = None
+    voice_channel = FakeVoiceChannel(
+        guild=guild,
+        permissions=SimpleNamespace(view_channel=True, connect=False, speak=True),
+    )
+    modal = ui.AddSongModal(guild.id)
+    modal.query._value = "daft punk"
+    interaction = FakeInteraction(guild=guild, user=FakeMember(voice_channel=voice_channel))
+
+    await modal.on_submit(interaction)
+
+    assert voice_channel.connect_kwargs is None
+    assert "Connect" in last_response_text(interaction)
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 

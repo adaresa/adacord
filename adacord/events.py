@@ -1,20 +1,92 @@
 import logging
+import asyncio
+from typing import Any
 
+from discord.ext import commands
 import wavelink
 
 from adacord.persistence import (
     clear_guild_state as clear_saved_guild_state,
+    load_state,
     save_player_state,
     save_preserved_player_state,
 )
-from adacord.player import play_next
+from adacord.player import get_player, play_next
+from adacord.recovery import restore_guild_playback_state
 from adacord.sources import search_lavalink
+from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
 
 logger = logging.getLogger(__name__)
 
 NON_ADVANCING_TRACK_END_REASONS = {"loadfailed", "replaced"}
 RECOVERY_REQUESTER = "playback recovery"
+VOICE_RECONNECT_ATTEMPT_DELAYS = (0.0, 1.0, 3.0)
+
+
+def saved_playback_has_music(saved: dict[str, Any]) -> bool:
+    current = saved.get("current")
+    queue = saved.get("queue")
+    return isinstance(current, dict) or bool(queue if isinstance(queue, list) else [])
+
+
+def saved_playback_for_guild(guild_id: int) -> dict[str, Any] | None:
+    data = load_state()
+    guilds = data.get("guilds")
+    if not isinstance(guilds, dict):
+        return None
+    saved = guilds.get(str(guild_id))
+    if not isinstance(saved, dict):
+        return None
+    if not isinstance(saved.get("voice_channel_id"), int) or not saved_playback_has_music(saved):
+        return None
+    return saved
+
+
+async def reconnect_saved_voice_playback(bot: commands.Bot, guild_id: int, saved: dict[str, Any]) -> None:
+    guild = bot.get_guild(guild_id)
+    last_error: Exception | None = None
+    for attempt, delay in enumerate(VOICE_RECONNECT_ATTEMPT_DELAYS, start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await restore_guild_playback_state(bot, guild_id, saved)
+            if guild and (player := get_player(guild)) and getattr(player, "connected", True):
+                logger.info("Reconnected saved voice playback for guild %s on attempt %s", guild_id, attempt)
+                return
+            last_error = RuntimeError("restore completed without a connected player")
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Voice playback reconnect attempt %s/%s failed for guild %s: %s",
+                attempt,
+                len(VOICE_RECONNECT_ATTEMPT_DELAYS),
+                guild_id,
+                exc,
+            )
+
+    logger.error("Could not reconnect saved voice playback for guild %s: %s", guild_id, last_error)
+
+
+async def handle_bot_voice_disconnect(bot: commands.Bot, guild_id: int) -> None:
+    saved = saved_playback_for_guild(guild_id)
+    if not saved:
+        return
+
+    state = get_guild_state(guild_id)
+    task = state.voice_reconnect_task
+    if task and not task.done():
+        return
+
+    async def runner() -> None:
+        try:
+            await reconnect_saved_voice_playback(bot, guild_id, saved)
+        finally:
+            current_task = asyncio.current_task()
+            if state.voice_reconnect_task is current_task:
+                state.voice_reconnect_task = None
+
+    state.voice_reconnect_task = asyncio.create_task(runner())
 
 
 async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
