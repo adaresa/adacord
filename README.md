@@ -96,7 +96,7 @@ docker compose up -d
 docker compose logs -f watchdog lavalink bot
 ```
 
-The watchdog runs `loadtracks` against Lavalink every few minutes. After repeated failed probes, it restarts `yt-cipher`, Lavalink, and the bot. It mounts `/var/run/docker.sock`, which gives that container permission to control Docker on the host, so only enable it on a server you control.
+The watchdog runs `loadtracks` against Lavalink every few minutes. After three consecutive failed probes, it restarts `yt-cipher`, Lavalink, and the bot. Probe failure logs include the returned Lavalink `loadType` and a short response excerpt for diagnosis. It mounts `/var/run/docker.sock`, which gives that container permission to control Docker on the host, so only enable it on a server you control.
 
 ## Updating
 
