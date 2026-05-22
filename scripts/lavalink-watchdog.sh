@@ -6,7 +6,7 @@ set -eu
 : "${LAVALINK_HEALTH_IDENTIFIER:=ytmsearch%3Anever%20gonna%20give%20you%20up}"
 : "${LAVALINK_WATCHDOG_INTERVAL:=300}"
 : "${LAVALINK_WATCHDOG_TIMEOUT:=30}"
-: "${LAVALINK_WATCHDOG_FAILURES:=2}"
+: "${LAVALINK_WATCHDOG_FAILURES:=3}"
 : "${LAVALINK_WATCHDOG_START_PERIOD:=90}"
 : "${LAVALINK_WATCHDOG_RESTART_CONTAINERS:=adacord-yt-cipher adacord-lavalink adacord-bot}"
 
@@ -14,6 +14,14 @@ failures=0
 
 log() {
   printf '%s %s\n' "$(date -Iseconds)" "$*"
+}
+
+response_excerpt() {
+  printf '%s' "$1" | tr '\r\n' '  ' | cut -c 1-500
+}
+
+response_load_type() {
+  printf '%s' "$1" | sed -n 's/.*"loadType":"\([^"]*\)".*/\1/p' | head -n 1
 }
 
 probe_lavalink() {
@@ -26,17 +34,21 @@ probe_lavalink() {
       --header="Authorization: $LAVALINK_PASSWORD" \
       "$url" 2>&1
   )" || {
-    log "Lavalink playback probe failed: $response"
+    log "Lavalink playback probe failed: $(response_excerpt "$response")"
     return 1
   }
 
   if ! printf '%s' "$response" | grep -q '"loadType":"search"'; then
-    log "Lavalink playback probe returned an unexpected loadType"
+    load_type="$(response_load_type "$response")"
+    if [ -z "$load_type" ]; then
+      load_type="<missing>"
+    fi
+    log "Lavalink playback probe returned unexpected loadType=$load_type response=$(response_excerpt "$response")"
     return 1
   fi
 
   if ! printf '%s' "$response" | grep -q '"encoded"'; then
-    log "Lavalink playback probe returned no tracks"
+    log "Lavalink playback probe returned no tracks response=$(response_excerpt "$response")"
     return 1
   fi
 }
