@@ -16,6 +16,7 @@ from adacord.player import (
 )
 from adacord.state import get_guild_state
 from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, queue_track_request
+from adacord.utils import compact_log_value, track_log_label
 from adacord.ui import (
     acknowledge,
     create_or_update_display,
@@ -81,10 +82,27 @@ async def join_impl(interaction: discord.Interaction) -> None:
 
 
 async def play_impl(interaction: discord.Interaction, query: str) -> None:
+    guild_id = interaction.guild.id if interaction.guild else None
+    logger.info(
+        "Received /play request: guild=%s user=%s query=%r",
+        guild_id,
+        compact_log_value(interaction.user, limit=80),
+        compact_log_value(query, limit=160),
+    )
     player = await connect_for_interaction(interaction)
     if not player or not interaction.guild:
         return
 
+    logger.info(
+        "Connected player for /play: guild=%s channel=%s current=%s queue=%s playing=%s paused=%s connected=%s",
+        interaction.guild.id,
+        getattr(getattr(player, "channel", None), "id", None),
+        track_log_label(player.current),
+        len(list(player.queue)),
+        player.playing,
+        player.paused,
+        player.connected,
+    )
     try:
         result = await queue_track_request(player, query, str(interaction.user))
     except TrackRequestLoadError as exc:
@@ -100,6 +118,16 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await respond_and_clear_deferred(interaction, "No playable tracks were found.", ephemeral=True)
         return
 
+    logger.info(
+        "Finished /play request: guild=%s added=%s was_idle=%s current=%s queue=%s playing=%s paused=%s",
+        interaction.guild.id,
+        len(result.tracks),
+        result.was_idle,
+        track_log_label(player.current),
+        len(list(player.queue)),
+        player.playing,
+        player.paused,
+    )
     if result.was_idle and interaction.channel:
         await create_or_update_display(interaction.guild.id, interaction.channel, player, manage_refresh=False)
     else:

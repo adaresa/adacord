@@ -12,13 +12,11 @@ from conftest import FakePlayer, FakeQueue, FakeTrack
 @pytest.fixture(autouse=True)
 def clear_recommendation_cache():
     recommendations.clear_recommendation_cache()
-    recommendations.spotify_seed_disabled_until = 0.0
     yield
     recommendations.clear_recommendation_cache()
-    recommendations.spotify_seed_disabled_until = 0.0
 
 
-def test_recommendation_queries_use_spotify_isrc_and_youtube_fallbacks() -> None:
+def test_recommendation_queries_use_youtube_music_fallbacks() -> None:
     current = FakeTrack("One More Time", author="Daft Punk")
     current.isrc = "GBDUW0000053"
     current.uri = "https://open.spotify.com/track/abc123?si=token"
@@ -27,8 +25,7 @@ def test_recommendation_queries_use_spotify_isrc_and_youtube_fallbacks() -> None
 
     queries = recommendations.recommendation_queries(player)
 
-    assert "sprec:mix:track:abc123" in queries
-    assert "sprec:mix:isrc:GBDUW0000053" in queries
+    assert all(not query.startswith(("spsearch:", "sprec:")) for query in queries)
     assert "ytmsearch:Daft Punk radio" in queries
     assert "ytmsearch:Daft Punk - Digital Love radio" in queries
     assert "ytmsearch:Daft Punk similar artists songs" in queries
@@ -257,54 +254,6 @@ async def test_load_recommendation_candidates_continues_after_query_failure(monk
 
     assert found in candidates
     assert len(calls) > 1
-
-
-async def test_load_recommendation_candidates_uses_spotify_seed_recommendations(monkeypatch) -> None:
-    current = FakeTrack("Kids", author="MGMT")
-    spotify_seed = FakeTrack("Kids", author="MGMT", source="spotify")
-    spotify_seed.identifier = "spotify-kids"
-    suggestion = FakeTrack("Electric Feel", author="MGMT")
-    player = FakePlayer(current=current)
-    calls = []
-
-    async def fake_search(query, requester, *, limit=None):
-        calls.append(query)
-        if query.startswith("spsearch:"):
-            return [spotify_seed]
-        if query == "sprec:mix:track:spotify-kids":
-            return [suggestion]
-        return []
-
-    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
-
-    candidates = await recommendations.load_recommendation_candidates(player)
-
-    assert "spsearch:MGMT - Kids" in calls
-    assert "sprec:mix:track:spotify-kids" in calls
-    assert suggestion in candidates
-
-
-async def test_spotify_seed_backoff_stops_after_first_failure(monkeypatch) -> None:
-    player = FakePlayer(
-        current=FakeTrack("First", author="Artist A"),
-        queue=FakeQueue([FakeTrack("Second", author="Artist B"), FakeTrack("Third", author="Artist C")]),
-    )
-    calls = []
-    now = 1000.0
-
-    async def fake_search(query, requester, *, limit=None):
-        calls.append(query)
-        raise RuntimeError("spotify unavailable")
-
-    monkeypatch.setattr(recommendations.time, "monotonic", lambda: now)
-    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
-
-    assert await recommendations.spotify_seed_tracks(player) == []
-    assert calls == ["spsearch:Artist A - First"]
-    assert recommendations.spotify_seed_disabled_until == now + recommendations.SPOTIFY_SEED_BACKOFF_SECONDS
-
-    assert await recommendations.spotify_seed_tracks(player) == []
-    assert calls == ["spsearch:Artist A - First"]
 
 
 async def test_resolve_recommendation_value_uses_lavalink_search(monkeypatch) -> None:

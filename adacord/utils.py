@@ -170,3 +170,39 @@ def track_display_title(track: object) -> str:
         return str(display_title)
 
     return getattr(track, "title", "Unknown track")
+
+
+def compact_log_value(value: object, *, limit: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+def track_log_label(track: object | None) -> str:
+    if not track:
+        return "none"
+
+    if isinstance(track, Mapping):
+        title_value = track.get("display_title") or track.get("title") or "Unknown track"
+        author_value = track.get("author")
+        source_value = track.get("source")
+        uri_value = track.get("uri")
+    else:
+        title_value = track_display_title(track)
+        author_value = display_track_author(track)
+        source_value = getattr(track, "source", "") or ""
+        uri_value = getattr(track, "uri", "") or ""
+
+    title = compact_log_value(title_value, limit=100)
+    author = compact_log_value(author_value, limit=60)
+    source = compact_log_value(source_value, limit=40)
+    uri = compact_log_value(uri_value, limit=120)
+    details = []
+    if author:
+        details.append(f"author={author}")
+    if source:
+        details.append(f"source={source}")
+    if uri:
+        details.append(f"uri={uri}")
+    return f"{title} ({', '.join(details)})" if details else title

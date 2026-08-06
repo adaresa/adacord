@@ -16,6 +16,7 @@ from adacord.recovery import restore_guild_playback_state
 from adacord.sources import search_lavalink
 from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
+from adacord.utils import track_log_label
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,14 @@ async def reconnect_saved_voice_playback(bot: commands.Bot, guild_id: int, saved
         if delay:
             await asyncio.sleep(delay)
         try:
+            logger.warning(
+                "Voice playback reconnect attempt %s/%s starting for guild %s: saved_current=%s saved_queue=%s",
+                attempt,
+                len(VOICE_RECONNECT_ATTEMPT_DELAYS),
+                guild_id,
+                track_log_label(saved.get("current")),
+                len(saved.get("queue") if isinstance(saved.get("queue"), list) else []),
+            )
             await restore_guild_playback_state(bot, guild_id, saved)
             if guild and (player := get_player(guild)) and getattr(player, "connected", True):
                 logger.info("Reconnected saved voice playback for guild %s on attempt %s", guild_id, attempt)
@@ -73,16 +82,29 @@ async def handle_bot_voice_disconnect(
     guild_id: int,
     player: wavelink.Player | None = None,
 ) -> None:
+    state = get_guild_state(guild_id)
+    if state.voice_refresh_in_progress:
+        logger.info("Ignoring intentional voice disconnect during session refresh for guild %s", guild_id)
+        return
+
+    logger.warning(
+        "Bot voice disconnect observed for guild %s: had_player=%s current=%s queue=%s",
+        guild_id,
+        bool(player),
+        track_log_label(player.current) if player else "none",
+        len(list(player.queue)) if player else 0,
+    )
     if player and (player.current or not player.queue.is_empty):
         await save_player_state(player)
 
     saved = saved_playback_for_guild(guild_id)
     if not saved:
+        logger.info("No saved playback to reconnect after voice disconnect for guild %s", guild_id)
         return
 
-    state = get_guild_state(guild_id)
     task = state.voice_reconnect_task
     if task and not task.done():
+        logger.info("Voice reconnect already in progress for guild %s", guild_id)
         return
 
     async def runner() -> None:
@@ -101,6 +123,16 @@ async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
     if not player:
         return
     reason = str(getattr(payload, "reason", "") or "").lower()
+    ended_track = getattr(payload, "track", None) or player.current
+    logger.info(
+        "Lavalink track end for guild %s: reason=%s track=%s queue=%s playing=%s paused=%s",
+        player.guild.id,
+        reason,
+        track_log_label(ended_track),
+        len(list(player.queue)),
+        player.playing,
+        player.paused,
+    )
     if reason in NON_ADVANCING_TRACK_END_REASONS:
         logger.info("Ignoring non-advancing track end for guild %s: %s", player.guild.id, reason)
         return
@@ -112,6 +144,15 @@ async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
 
 async def handle_track_start(payload: wavelink.TrackStartEventPayload) -> None:
     if payload.player:
+        track = getattr(payload, "track", None) or payload.player.current
+        logger.info(
+            "Lavalink track start for guild %s: track=%s queue=%s playing=%s paused=%s",
+            payload.player.guild.id,
+            track_log_label(track),
+            len(list(payload.player.queue)),
+            payload.player.playing,
+            payload.player.paused,
+        )
         await update_display_for_guild(payload.player.guild.id, payload.player)
         await save_player_state(payload.player)
 
@@ -186,7 +227,15 @@ async def handle_track_exception(payload: wavelink.TrackExceptionEventPayload) -
     position = max(0, int(getattr(player, "position", 0) or 0))
     volume = player.volume
     paused = bool(player.paused)
-    logger.warning("Lavalink track exception in guild %s: %s", player.guild.id, payload.exception)
+    logger.warning(
+        "Lavalink track exception in guild %s: track=%s queue=%s position=%s paused=%s exception=%s",
+        player.guild.id,
+        track_log_label(failed_track),
+        len(queued),
+        position,
+        paused,
+        payload.exception,
+    )
 
     try:
         if failed_track and await recover_failed_track(player, failed_track, position=position, volume=volume):
@@ -212,9 +261,13 @@ async def handle_track_stuck(payload: wavelink.TrackStuckEventPayload) -> None:
     volume = player.volume
     paused = bool(player.paused)
     logger.warning(
-        "Lavalink track stuck in guild %s after threshold %s",
+        "Lavalink track stuck in guild %s after threshold %s: track=%s queue=%s position=%s paused=%s",
         player.guild.id,
         getattr(payload, "threshold", None),
+        track_log_label(failed_track),
+        len(queued),
+        position,
+        paused,
     )
 
     try:
@@ -231,6 +284,13 @@ async def handle_track_stuck(payload: wavelink.TrackStuckEventPayload) -> None:
 
 
 async def handle_inactive_player(player: wavelink.Player) -> None:
+    logger.info(
+        "Lavalink inactive player for guild %s: current=%s queue=%s connected=%s",
+        player.guild.id,
+        track_log_label(player.current),
+        len(list(player.queue)),
+        player.connected,
+    )
     await update_display_for_guild(player.guild.id, None)
     await clear_saved_guild_state(player.guild.id)
 

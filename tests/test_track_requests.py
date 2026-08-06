@@ -1,5 +1,6 @@
 from adacord import track_requests
 from adacord.sources import LoadSummary
+from adacord.state import get_guild_state
 from conftest import FakePlayer, FakeQueue, FakeTrack
 
 
@@ -51,3 +52,23 @@ async def test_queue_track_request_play_first_starts_front_track_when_not_playin
     assert result.tracks == [first]
     assert player.current is first
     assert list(player.queue) == [queued]
+
+
+async def test_queue_track_request_preserves_pause_time_while_paused(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), paused=True, playing=True)
+    state = get_guild_state(player.guild.id)
+    state.paused_at = 123.0
+
+    async def fake_load_tracks(query, requester):
+        return [FakeTrack("Next")], LoadSummary("Next", 1, "youtube")
+
+    async def fake_save(seen_player):
+        return None
+
+    monkeypatch.setattr(track_requests, "load_tracks", fake_load_tracks)
+    monkeypatch.setattr(track_requests, "save_player_state", fake_save)
+    monkeypatch.setattr(track_requests, "clear_guild_recommendation_cache", lambda guild_id: None)
+
+    await track_requests.queue_track_request(player, "next", "tester")
+
+    assert state.paused_at == 123.0

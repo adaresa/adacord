@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -17,6 +18,7 @@ from adacord.player import (
     ensure_player,
     get_player,
     queue_items,
+    reconnect_player_voice,
     set_loop_mode,
     set_volume,
     validate_voice_channel_permissions,
@@ -60,6 +62,7 @@ IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
 DISPLAY_LOOKUP_HISTORY_LIMIT = 50
 DISPLAY_EDIT_RETRIES = 3
 DISPLAY_EDIT_RETRY_DELAY = 0.5
+LONG_PAUSE_VOICE_RECONNECT_SECONDS = 10 * 60
 
 
 async def refresh_display_with_recommendations(guild_id: int, player: wavelink.Player) -> None:
@@ -73,6 +76,12 @@ def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player 
     if not interaction.guild:
         return None
     return get_player(interaction.guild)
+
+
+def should_reconnect_voice_after_pause(state: GuildState) -> bool:
+    if state.paused_at is None:
+        return False
+    return time.monotonic() - state.paused_at >= LONG_PAUSE_VOICE_RECONNECT_SECONDS
 
 
 def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
@@ -476,9 +485,26 @@ class PlayerPanelView(discord.ui.LayoutView):
             await respond(interaction, "Nothing to pause or resume.", ephemeral=True)
             return
         should_pause = not player.paused
-        await player.pause(should_pause)
-        await save_player_state(player)
+        state = get_guild_state(player.guild.id)
         await acknowledge(interaction)
+        if should_pause:
+            state.paused_at = time.monotonic()
+            await player.pause(True)
+        elif should_reconnect_voice_after_pause(state):
+            try:
+                player = await reconnect_player_voice(player)
+            except MissingVoicePermissions as exc:
+                await respond(interaction, str(exc), ephemeral=True)
+                return
+            except Exception as exc:
+                logger.exception("Failed to refresh stale voice session before resume")
+                await respond(interaction, f"Could not refresh voice before resuming: {exc}", ephemeral=True)
+                return
+            state.paused_at = None
+        else:
+            state.paused_at = None
+            await player.pause(False)
+        await save_player_state(player)
         await self.refresh(interaction)
 
     async def skip(self, interaction: discord.Interaction) -> None:

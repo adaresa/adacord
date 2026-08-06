@@ -17,6 +17,7 @@ from adacord.config import (
     voice_connect_timeout,
 )
 from adacord.state import get_guild_state
+from adacord.utils import track_log_label
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,23 @@ async def ensure_player(
     async with state.connect_lock:
         player = get_player(guild)
         if player and player.connected:
+            logger.info(
+                "Reusing connected player for guild %s: channel=%s target=%s current=%s queue=%s playing=%s paused=%s",
+                guild.id,
+                getattr(getattr(player, "channel", None), "id", None),
+                getattr(target_channel, "id", None),
+                track_log_label(player.current),
+                len(list(player.queue)),
+                player.playing,
+                player.paused,
+            )
             if player.channel != target_channel:
+                logger.info(
+                    "Moving connected player for guild %s: from=%s to=%s",
+                    guild.id,
+                    getattr(getattr(player, "channel", None), "id", None),
+                    getattr(target_channel, "id", None),
+                )
                 await player.move_to(target_channel)
             await wait_for_lavalink_voice(player)
             return player
@@ -128,6 +145,11 @@ async def ensure_player(
             await cleanup_voice_client(guild, "stale voice client before reconnect")
 
         try:
+            logger.info(
+                "Connecting player for guild %s to voice channel %s",
+                guild.id,
+                getattr(target_channel, "id", None),
+            )
             player = await target_channel.connect(
                 cls=wavelink.Player,
                 self_deaf=True,
@@ -138,14 +160,79 @@ async def ensure_player(
             player.inactive_channel_tokens = 1
             await wait_for_lavalink_voice(player)
             await player.set_volume(default_volume())
+            logger.info(
+                "Connected player for guild %s: channel=%s volume=%s",
+                guild.id,
+                getattr(target_channel, "id", None),
+                player.volume,
+            )
             return player
         except Exception:
             await cleanup_voice_client(guild, "voice connection failed")
             raise
 
 
+async def reconnect_player_voice(player: wavelink.Player) -> wavelink.Player:
+    current = player.current
+    queued = list(player.queue)
+    position = max(0, int(getattr(player, "position", 0) or 0))
+    volume = player.volume if player.volume is not None else default_volume()
+    target_channel = player.channel
+    guild = player.guild
+    if target_channel is None:
+        raise RuntimeError("Cannot reconnect voice without a known voice channel.")
+
+    validate_voice_channel_permissions(guild, target_channel)
+    state = get_guild_state(guild.id)
+    loop_mode = state.loop_mode
+    async with state.connect_lock:
+        state.voice_refresh_in_progress = True
+        try:
+            logger.warning(
+                "Refreshing voice session for guild %s: channel=%s current=%s queue=%s position=%s volume=%s",
+                guild.id,
+                getattr(target_channel, "id", None),
+                track_log_label(current),
+                len(queued),
+                position,
+                volume,
+            )
+            await cleanup_voice_client(guild, "refreshing stale voice session")
+            new_player = await target_channel.connect(
+                cls=wavelink.Player,
+                self_deaf=True,
+                reconnect=True,
+                timeout=voice_connect_timeout(),
+            )
+            new_player.inactive_timeout = player_idle_timeout()
+            new_player.inactive_channel_tokens = 1
+            await wait_for_lavalink_voice(new_player)
+            await new_player.set_volume(volume)
+            new_player.queue.put(queued)
+            set_loop_mode(new_player, loop_mode)
+            if current:
+                logger.info(
+                    "Replaying current track after voice refresh for guild %s: start=%s track=%s",
+                    guild.id,
+                    position,
+                    track_log_label(current),
+                )
+                await new_player.play(current, start=position, volume=volume, add_history=False)
+            logger.info(
+                "Refreshed voice session for guild %s: connected=%s current=%s queue=%s",
+                guild.id,
+                new_player.connected,
+                track_log_label(new_player.current),
+                len(list(new_player.queue)),
+            )
+            return new_player
+        finally:
+            state.voice_refresh_in_progress = False
+
+
 async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
     loop = asyncio.get_running_loop()
+    started = loop.time()
     deadline = loop.time() + lavalink_voice_ready_timeout()
 
     while True:
@@ -156,12 +243,24 @@ async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
             payload = None
 
         if payload and payload.state.connected:
+            logger.info(
+                "Lavalink voice ready for guild %s after %.2fs: ping=%s",
+                player.guild.id,
+                loop.time() - started,
+                payload.state.ping,
+            )
             return
 
         if loop.time() >= deadline:
             state = "missing"
             if payload:
                 state = f"connected={payload.state.connected}, ping={payload.state.ping}"
+            logger.warning(
+                "Timed out waiting for Lavalink voice in guild %s after %.2fs: %s",
+                player.guild.id,
+                loop.time() - started,
+                state,
+            )
             raise RuntimeError(f"Lavalink did not finish connecting to voice ({state}).")
 
         await asyncio.sleep(lavalink_voice_ready_interval())
@@ -176,19 +275,59 @@ async def add_tracks(
     if not tracks:
         return
 
+    was_idle = not player.current and player.queue.is_empty
+    logger.info(
+        "Adding %s track(s) to guild %s queue: start_playback=%s was_idle=%s current=%s queue_before=%s",
+        len(tracks),
+        player.guild.id,
+        start_playback,
+        was_idle,
+        track_log_label(player.current),
+        len(list(player.queue)),
+    )
     player.queue.put(tracks)
     if start_playback and not player.playing and not player.paused:
         await play_next(player)
+    logger.info(
+        "Added tracks to guild %s: current=%s queue_after=%s playing=%s paused=%s",
+        player.guild.id,
+        track_log_label(player.current),
+        len(list(player.queue)),
+        player.playing,
+        player.paused,
+    )
 
 
 async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
     if player.queue.is_empty:
+        logger.info("play_next skipped for guild %s: queue is empty", player.guild.id)
         return None
 
+    logger.info(
+        "Starting next track for guild %s: current=%s queue_before=%s connected=%s",
+        player.guild.id,
+        track_log_label(player.current),
+        len(list(player.queue)),
+        player.connected,
+    )
     await wait_for_lavalink_voice(player)
     track = player.queue.get()
     volume = player.volume if player.volume is not None else default_volume()
+    logger.info(
+        "Calling Lavalink play for guild %s: volume=%s track=%s",
+        player.guild.id,
+        volume,
+        track_log_label(track),
+    )
     await player.play(track, volume=volume)
+    logger.info(
+        "Lavalink play call completed for guild %s: current=%s queue_after=%s playing=%s paused=%s",
+        player.guild.id,
+        track_log_label(player.current),
+        len(list(player.queue)),
+        player.playing,
+        player.paused,
+    )
     return track
 
 
@@ -216,6 +355,8 @@ def queue_items(player: wavelink.Player) -> list[wavelink.Playable]:
 
 
 async def clear_player(player: wavelink.Player) -> None:
+    state = get_guild_state(player.guild.id)
+    state.paused_at = None
     set_loop_mode(player, "none")
     player.queue.clear()
     player.queue.history.clear()
