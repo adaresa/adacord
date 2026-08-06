@@ -7,7 +7,7 @@ import wavelink
 
 from adacord.player import queue_items
 from adacord.sources import SONG_SEARCH_LIMIT, score_song_candidate, search_lavalink
-from adacord.utils import AVOID_TERMS, normalized_words, text_contains_term, track_display_title
+from adacord.utils import AVOID_TERMS, normalized_words, text_contains_term, track_display_title, track_log_label
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +16,6 @@ RECOMMENDATION_COUNT = 10
 RECOMMENDATION_REQUESTER = "Adacord suggestions"
 RECOMMENDATION_POOL_LIMIT = 25
 MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD = 20
-SPOTIFY_SEED_LIMIT = 4
-SPOTIFY_SEED_BACKOFF_SECONDS = 15 * 60
-spotify_seed_disabled_until = 0.0
 RECOMMENDATION_VARIANT_TERMS = AVOID_TERMS | {
     "acapella",
     "a cappella",
@@ -116,18 +113,6 @@ def recommendation_value(track: object) -> str:
     return format_recommendation_label(track)[:100]
 
 
-def track_isrc(track: object | None) -> str | None:
-    isrc = getattr(track, "isrc", None)
-    if isrc:
-        return str(isrc)
-    raw_data = getattr(track, "raw_data", None)
-    if isinstance(raw_data, dict):
-        raw_isrc = raw_data.get("info", {}).get("isrc")
-        if raw_isrc:
-            return str(raw_isrc)
-    return None
-
-
 def identity_for_track(track: object) -> str:
     return track_identifier(track) or track_uri(track) or track_query_text(track) or track_display_title(track)
 
@@ -157,34 +142,16 @@ def track_query_text(track: object | None) -> str:
     return f"{author} - {title}" if author else title
 
 
-def spotify_track_id(track: object | None) -> str | None:
-    source = track_source(track)
-    identifier = track_identifier(track)
-    uri = track_uri(track) or ""
-    if source == "spotify" and identifier:
-        return identifier
-    marker = "open.spotify.com/track/"
-    if marker in uri:
-        return uri.split(marker, 1)[1].split("?", 1)[0].split("/", 1)[0]
-    return None
-
-
 def recommendation_queries(player: wavelink.Player) -> list[str]:
     current = player.current
     if not current:
         return []
 
     queries: list[str] = []
-    spotify_id = spotify_track_id(current)
-    isrc = track_isrc(current)
     title = track_title(current)
     author = track_author(current)
     current_query = track_query_text(current)
 
-    if spotify_id:
-        queries.append(f"sprec:mix:track:{spotify_id}")
-    if isrc:
-        queries.append(f"sprec:mix:isrc:{isrc}")
     queued = queue_items(player)[:3]
     queue_terms = [track_query_text(track) for track in queued if track_query_text(track)]
     queue_authors = [track_author(track) for track in queued if track_author(track)]
@@ -339,26 +306,6 @@ def rank_recommendations(
     )
 
 
-async def spotify_seed_tracks(player: wavelink.Player) -> list[wavelink.Playable]:
-    global spotify_seed_disabled_until
-
-    now = time.monotonic()
-    if spotify_seed_disabled_until > now:
-        return []
-
-    seeds = [player.current, *queue_items(player)[: SPOTIFY_SEED_LIMIT - 1]]
-    queries = [track_query_text(track) for track in seeds if track_query_text(track)]
-    found: list[wavelink.Playable] = []
-    for query in dict.fromkeys(queries):
-        try:
-            found.extend(await search_lavalink(f"spsearch:{query}", RECOMMENDATION_REQUESTER, limit=1))
-        except Exception as exc:
-            spotify_seed_disabled_until = time.monotonic() + SPOTIFY_SEED_BACKOFF_SECONDS
-            logger.debug("Spotify seed query %r failed: %s", query, exc)
-            break
-    return found
-
-
 def prune_recommendation_cache(now: float | None = None, guild_id: int | None = None) -> None:
     now = time.monotonic() if now is None else now
 
@@ -379,27 +326,25 @@ def prune_recommendation_cache(now: float | None = None, guild_id: int | None = 
 
 
 async def load_recommendation_candidates(player: wavelink.Player) -> list[wavelink.Playable]:
+    started = time.perf_counter()
+    logger.info(
+        "Loading recommendations for guild %s: current=%s queue=%s",
+        player.guild.id,
+        track_log_label(player.current),
+        len(queue_items(player)),
+    )
     candidates: list[wavelink.Playable] = []
-    for seed in await spotify_seed_tracks(player):
-        seed_id = spotify_track_id(seed)
-        seed_isrc = track_isrc(seed)
-        seed_queries = []
-        if seed_id:
-            seed_queries.append(f"sprec:mix:track:{seed_id}")
-        if seed_isrc:
-            seed_queries.append(f"sprec:mix:isrc:{seed_isrc}")
-        for query in seed_queries:
-            try:
-                candidates.extend(await search_lavalink(query, RECOMMENDATION_REQUESTER, limit=RECOMMENDATION_POOL_LIMIT))
-            except Exception as exc:
-                logger.debug("Spotify recommendation query %r failed: %s", query, exc)
-
     for query in recommendation_queries(player):
         try:
-            limit = RECOMMENDATION_POOL_LIMIT if query.startswith("sprec:") else SONG_SEARCH_LIMIT
-            candidates.extend(await search_lavalink(query, RECOMMENDATION_REQUESTER, limit=limit))
+            candidates.extend(await search_lavalink(query, RECOMMENDATION_REQUESTER, limit=SONG_SEARCH_LIMIT))
         except Exception as exc:
             logger.debug("Recommendation query %r failed: %s", query, exc)
+    logger.info(
+        "Loaded %s recommendation candidate(s) for guild %s in %.2fs",
+        len(candidates),
+        player.guild.id,
+        time.perf_counter() - started,
+    )
     return candidates
 
 

@@ -13,6 +13,7 @@ from adacord.player import (
     disconnect_player,
     ensure_player,
     play_next,
+    reconnect_player_voice,
     set_loop_mode,
     set_volume,
 )
@@ -81,6 +82,31 @@ async def test_ensure_player_rejects_missing_voice_permissions_before_connect() 
         await ensure_player(guild, channel)
 
     assert channel.connect_kwargs is None
+
+
+async def test_reconnect_player_voice_preserves_playback_state() -> None:
+    guild = FakeGuild()
+    current = FakeTrack("Current")
+    current.position = 45_000
+    queued = FakeTrack("Next")
+    old_player = FakePlayer(guild=guild, current=current, queue=FakeQueue([queued]), volume=80, paused=True)
+    new_player = FakePlayer(guild=guild, volume=50, playing=False)
+    channel = FakeVoiceChannel(guild=guild, player=new_player)
+    old_player.channel = channel
+    guild.voice_client = old_player
+    state = get_guild_state(guild.id)
+    state.loop_mode = "queue"
+
+    result = await reconnect_player_voice(old_player)
+
+    assert result is new_player
+    assert old_player.disconnect_calls == 1
+    assert new_player.volume == 80
+    assert new_player.current is current
+    assert new_player.play_kwargs[-1] == {"start": 45_000, "add_history": False}
+    assert list(new_player.queue) == [queued]
+    assert new_player.queue.mode == wavelink.QueueMode.loop_all
+    assert state.voice_refresh_in_progress is False
 
 
 async def test_set_volume_clamps_values() -> None:

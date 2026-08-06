@@ -599,6 +599,61 @@ async def test_player_panel_controls_update_player_silently(monkeypatch) -> None
     assert len(updates) == 6
 
 
+async def test_pause_records_pause_time(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), paused=False, playing=True)
+    updates = []
+
+    async def fake_update(guild_id, seen_player):
+        updates.append((guild_id, seen_player))
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+
+    interaction = FakeInteraction(guild=player.guild)
+    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+
+    await view.pause_resume(interaction)
+
+    state = get_guild_state(player.guild.id)
+    assert player.pause_calls == [True]
+    assert state.paused_at is not None
+    assert interaction.response.deferred is True
+    assert updates == [(player.guild.id, player)]
+
+
+async def test_resume_after_long_pause_refreshes_voice_before_playing(monkeypatch) -> None:
+    old_player = FakePlayer(current=FakeTrack("Current"), paused=True, playing=True)
+    new_player = FakePlayer(guild=old_player.guild, current=old_player.current, paused=False, playing=True)
+    old_player.guild.voice_client = old_player
+    state = get_guild_state(old_player.guild.id)
+    state.paused_at = ui.time.monotonic() - ui.LONG_PAUSE_VOICE_RECONNECT_SECONDS - 1
+    updates = []
+    reconnects = []
+
+    async def fake_reconnect(seen_player):
+        reconnects.append(seen_player)
+        old_player.guild.voice_client = new_player
+        return new_player
+
+    async def fake_update(guild_id, seen_player):
+        updates.append((guild_id, seen_player))
+
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: interaction.guild.voice_client)
+    monkeypatch.setattr(ui, "reconnect_player_voice", fake_reconnect)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+
+    interaction = FakeInteraction(guild=old_player.guild)
+    view = ui.PlayerPanelView(old_player.guild.id, ui.build_player_panel_model(old_player, old_player.guild.id))
+
+    await view.pause_resume(interaction)
+
+    assert reconnects == [old_player]
+    assert old_player.pause_calls == []
+    assert state.paused_at is None
+    assert interaction.response.deferred is True
+    assert updates == [(old_player.guild.id, new_player)]
+
+
 async def test_player_panel_add_button_opens_modal(monkeypatch) -> None:
     player = FakePlayer()
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)

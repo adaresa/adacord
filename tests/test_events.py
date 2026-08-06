@@ -79,6 +79,24 @@ async def test_bot_voice_disconnect_without_saved_music_does_not_reconnect(monke
     assert get_guild_state(guild.id).voice_reconnect_task is None
 
 
+async def test_bot_voice_disconnect_during_voice_refresh_does_not_reconnect(monkeypatch) -> None:
+    guild = FakeGuild()
+    state = get_guild_state(guild.id)
+    state.voice_refresh_in_progress = True
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(events.asyncio, "create_task", fake_create_task)
+
+    await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id)
+
+    assert scheduled == []
+    assert state.voice_reconnect_task is None
+
+
 async def test_bot_voice_disconnect_schedules_reconnect_when_saved_music_exists(monkeypatch) -> None:
     guild = FakeGuild()
     saved = {"voice_channel_id": 456, "current": saved_track(FakeTrack("Current")), "queue": []}

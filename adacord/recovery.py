@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import discord
@@ -11,6 +12,7 @@ from adacord.persistence import load_state, save_player_state, track_from_payloa
 from adacord.player import MissingVoicePermissions, ensure_player, set_loop_mode
 from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
+from adacord.utils import track_log_label
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,15 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
     current_track = track_from_payload(current) if isinstance(current, dict) else None
     queue = saved.get("queue")
     queued_tracks = restored_tracks(queue) if isinstance(queue, list) else []
+    logger.info(
+        "Preparing playback restore for guild %s: voice_channel=%s current=%s queue=%s paused=%s position=%s",
+        guild_id,
+        saved.get("voice_channel_id"),
+        track_log_label(current if isinstance(current, dict) else current_track),
+        len(queued_tracks),
+        bool(saved.get("paused")),
+        saved.get("position"),
+    )
 
     voice_channel_id = saved.get("voice_channel_id")
     if not isinstance(voice_channel_id, int):
@@ -142,6 +153,13 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
         position = saved.get("position")
         start = position if isinstance(position, int) else 0
         start = max(0, min(start, max(0, current_track.length - 1000)))
+        logger.info(
+            "Restoring current track for guild %s: start=%s paused=%s track=%s",
+            guild_id,
+            start,
+            bool(saved.get("paused")),
+            track_log_label(current_track),
+        )
         await player.play(
             current_track,
             start=start,
@@ -149,6 +167,7 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
             paused=bool(saved.get("paused")),
             add_history=False,
         )
+        state.paused_at = time.monotonic() if bool(saved.get("paused")) else None
 
     await update_display_for_guild(guild_id, player)
     await save_player_state(player)
