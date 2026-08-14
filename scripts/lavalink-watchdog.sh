@@ -4,11 +4,13 @@ set -eu
 : "${LAVALINK_URL:=http://lavalink:2333}"
 : "${LAVALINK_PASSWORD:=adacord-internal-lavalink}"
 : "${LAVALINK_HEALTH_IDENTIFIER:=ytmsearch%3Anever%20gonna%20give%20you%20up}"
-: "${LAVALINK_WATCHDOG_INTERVAL:=300}"
+: "${LAVALINK_WATCHDOG_INTERVAL:=60}"
 : "${LAVALINK_WATCHDOG_TIMEOUT:=30}"
 : "${LAVALINK_WATCHDOG_FAILURES:=3}"
 : "${LAVALINK_WATCHDOG_START_PERIOD:=90}"
 : "${LAVALINK_WATCHDOG_RESTART_CONTAINERS:=adacord-yt-cipher adacord-lavalink adacord-bot}"
+: "${LAVALINK_WATCHDOG_STREAM_CANDIDATES:=3}"
+: "${LAVALINK_WATCHDOG_STREAM_SAMPLE_BYTES:=1024}"
 
 failures=0
 
@@ -22,6 +24,37 @@ response_excerpt() {
 
 response_load_type() {
   printf '%s' "$1" | sed -n 's/.*"loadType":"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+response_identifiers() {
+  printf '%s' "$1" | grep -o '"identifier":"[^"]*"' | head -n "$LAVALINK_WATCHDOG_STREAM_CANDIDATES" | cut -d '"' -f 4
+}
+
+probe_youtube_stream() {
+  video_id="$1"
+  stream_url="${LAVALINK_URL%/}/youtube/stream/${video_id}"
+  sample_file="/tmp/adacord-watchdog-stream-sample.$$"
+  error_file="/tmp/adacord-watchdog-stream-error.$$"
+
+  : > "$sample_file"
+  : > "$error_file"
+  wget \
+    -q \
+    -T "$LAVALINK_WATCHDOG_TIMEOUT" \
+    -O - \
+    --header="Authorization: $LAVALINK_PASSWORD" \
+    "$stream_url" 2>"$error_file" \
+    | head -c "$LAVALINK_WATCHDOG_STREAM_SAMPLE_BYTES" > "$sample_file"
+
+  sample_size="$(wc -c < "$sample_file" | tr -d ' ')"
+  if [ "$sample_size" -ge "$LAVALINK_WATCHDOG_STREAM_SAMPLE_BYTES" ]; then
+    rm -f "$sample_file" "$error_file"
+    return 0
+  fi
+
+  stream_probe_error="video=$video_id bytes=$sample_size error=$(response_excerpt "$(cat "$error_file")")"
+  rm -f "$sample_file" "$error_file"
+  return 1
 }
 
 probe_lavalink() {
@@ -51,6 +84,22 @@ probe_lavalink() {
     log "Lavalink playback probe returned no tracks response=$(response_excerpt "$response")"
     return 1
   fi
+
+  identifiers="$(response_identifiers "$response")"
+  if [ -z "$identifiers" ]; then
+    log "Lavalink playback probe returned no video identifiers response=$(response_excerpt "$response")"
+    return 1
+  fi
+
+  stream_probe_error="no stream candidates were tested"
+  for video_id in $identifiers; do
+    if probe_youtube_stream "$video_id"; then
+      return 0
+    fi
+  done
+
+  log "Lavalink playback probe could not open media for any candidate: $stream_probe_error"
+  return 1
 }
 
 restart_music_stack() {

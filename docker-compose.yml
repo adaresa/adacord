@@ -52,6 +52,9 @@ services:
     environment:
       LAVALINK_URL: http://lavalink:2333
       LAVALINK_PASSWORD: adacord-internal-lavalink
+      LAVALINK_WATCHDOG_INTERVAL: "60"
+      LAVALINK_WATCHDOG_STREAM_CANDIDATES: "3"
+      LAVALINK_WATCHDOG_STREAM_SAMPLE_BYTES: "1024"
       LAVALINK_WATCHDOG_RESTART_CONTAINERS: "adacord-yt-cipher adacord-lavalink adacord-bot"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

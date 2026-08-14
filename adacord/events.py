@@ -13,15 +13,16 @@ from adacord.persistence import (
 )
 from adacord.player import get_player, play_next
 from adacord.recovery import restore_guild_playback_state
-from adacord.sources import search_lavalink
+from adacord.sources import search_lavalink, search_youtube_alternative
 from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
-from adacord.utils import track_log_label
+from adacord.utils import compact_log_value, track_log_label
 
 logger = logging.getLogger(__name__)
 
 NON_ADVANCING_TRACK_END_REASONS = {"loadfailed", "replaced"}
 RECOVERY_REQUESTER = "playback recovery"
+RECOVERY_ATTEMPTED_EXTRA = "playback_recovery_attempted"
 VOICE_RECONNECT_ATTEMPT_DELAYS = (0.0, 1.0, 3.0)
 
 
@@ -167,6 +168,49 @@ def track_recovery_query(track: object) -> str | None:
     return str(query) if query else None
 
 
+def track_extra(track: object, name: str) -> object | None:
+    extras = getattr(track, "extras", None)
+    if isinstance(extras, dict):
+        return extras.get(name)
+    return getattr(extras, name, None)
+
+
+def mark_track_recovery_attempted(track: object) -> None:
+    extras = getattr(track, "extras", None)
+    try:
+        values = dict(extras) if extras is not None else {}
+    except (TypeError, ValueError):
+        values = {}
+    values[RECOVERY_ATTEMPTED_EXTRA] = True
+    track.extras = values
+
+
+def youtube_playback_rejected(exception: object) -> bool:
+    text = str(exception).lower()
+    return "all clients failed to load the item" in text and any(
+        reason in text
+        for reason in (
+            "requires login",
+            "cannot be viewed anonymously",
+            "video is unavailable",
+            "video player configuration error",
+        )
+    )
+
+
+def alternate_recovery_query(track: object) -> str | None:
+    query = track_extra(track, "query")
+    uri = str(getattr(track, "uri", "") or "")
+    if query and str(query) != uri:
+        return str(query)
+
+    title = str(getattr(track, "title", "") or "").strip()
+    author = str(getattr(track, "author", "") or "").strip()
+    if title and author:
+        return f"{author} {title}"
+    return title or author or None
+
+
 async def preserve_failed_playback(
     player: wavelink.Player,
     failed_track: wavelink.Playable | None,
@@ -191,18 +235,38 @@ async def recover_failed_track(
     *,
     position: int,
     volume: int | None,
+    use_alternative: bool = False,
 ) -> bool:
-    query = track_recovery_query(failed_track)
+    if track_extra(failed_track, RECOVERY_ATTEMPTED_EXTRA):
+        logger.warning(
+            "Not retrying failed recovery track for guild %s: track=%s",
+            player.guild.id,
+            track_log_label(failed_track),
+        )
+        return False
+
+    mark_track_recovery_attempted(failed_track)
+    query = alternate_recovery_query(failed_track) if use_alternative else track_recovery_query(failed_track)
     if not query:
         logger.info("No recovery query available for failed track in guild %s", player.guild.id)
         return False
 
-    tracks = await search_lavalink(query, RECOVERY_REQUESTER, limit=1)
-    if not tracks:
+    if use_alternative:
+        failed_uri = str(getattr(failed_track, "uri", "") or "")
+        replacement = await search_youtube_alternative(
+            query,
+            RECOVERY_REQUESTER,
+            exclude_uris={failed_uri} if failed_uri else set(),
+        )
+    else:
+        tracks = await search_lavalink(query, RECOVERY_REQUESTER, limit=1)
+        replacement = tracks[0] if tracks else None
+
+    if not replacement:
         logger.info("Recovery query returned no tracks for guild %s: %s", player.guild.id, query)
         return False
 
-    replacement = tracks[0]
+    mark_track_recovery_attempted(replacement)
     length = getattr(replacement, "length", None)
     start = max(0, position)
     if isinstance(length, int) and length > 0:
@@ -234,11 +298,17 @@ async def handle_track_exception(payload: wavelink.TrackExceptionEventPayload) -
         len(queued),
         position,
         paused,
-        payload.exception,
+        compact_log_value(payload.exception, limit=500),
     )
 
     try:
-        if failed_track and await recover_failed_track(player, failed_track, position=position, volume=volume):
+        if failed_track and await recover_failed_track(
+            player,
+            failed_track,
+            position=position,
+            volume=volume,
+            use_alternative=youtube_playback_rejected(payload.exception),
+        ):
             logger.info("Recovered failed track for guild %s without consuming queue", player.guild.id)
             await update_display_for_guild(player.guild.id, player)
             await save_player_state(player)

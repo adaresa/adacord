@@ -96,7 +96,7 @@ docker compose up -d
 docker compose logs -f watchdog lavalink bot
 ```
 
-The watchdog runs `loadtracks` against Lavalink every few minutes. After three consecutive failed probes, it restarts `yt-cipher`, Lavalink, and the bot. Probe failure logs include the returned Lavalink `loadType` and a short response excerpt for diagnosis. It mounts `/var/run/docker.sock`, which gives that container permission to control Docker on the host, so only enable it on a server you control.
+The watchdog checks YouTube search once a minute, then opens a small media sample from up to three returned videos. This catches cases where metadata search works but every actual stream fails. After three consecutive failed probes, it restarts `yt-cipher`, Lavalink, and the bot. Probe failure logs include the returned Lavalink `loadType` or a compact stream error for diagnosis. It mounts `/var/run/docker.sock`, which gives that container permission to control Docker on the host, so only enable it on a server you control.
 
 ## Updating
 

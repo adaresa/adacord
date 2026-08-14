@@ -146,6 +146,26 @@ async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
     return tracks
 
 
+async def search_youtube_alternative(
+    query: str,
+    requester: str,
+    *,
+    exclude_uris: set[str],
+) -> wavelink.Playable | None:
+    """Return the best regular YouTube result not already rejected for playback."""
+    found = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+    if isinstance(found, wavelink.Playlist):
+        candidates = list(found.tracks)
+    else:
+        candidates = list(found[:SONG_SEARCH_LIMIT])
+
+    candidates = [track for track in candidates if str(getattr(track, "uri", "") or "") not in exclude_uris]
+    replacement = choose_best_song_candidate(candidates, query)
+    if replacement:
+        apply_requester([replacement], requester, query)
+    return replacement
+
+
 async def search_lavalink(query: str, requester: str, *, limit: int | None = None) -> list[wavelink.Playable]:
     found = await wavelink.Playable.search(query, source=None)
 
