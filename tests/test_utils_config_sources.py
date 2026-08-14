@@ -31,6 +31,7 @@ from adacord.sources import (
     load_tracks,
     search_lavalink,
     search_youtube,
+    search_youtube_alternative,
     spotify_public_playlist_queries,
 )
 from adacord.utils import (
@@ -295,6 +296,30 @@ async def test_search_youtube_handles_empty_results(monkeypatch) -> None:
     monkeypatch.setattr(wavelink.Playable, "search", staticmethod(fake_search))
 
     assert await search_youtube("missing song", "tester") == []
+
+
+async def test_search_youtube_alternative_uses_regular_youtube_and_excludes_failed_uri(
+    monkeypatch,
+    fake_track_factory,
+) -> None:
+    failed = fake_track_factory("Exact", author="Artist")
+    alternate = fake_track_factory("Exact Official Audio", author="Artist")
+
+    async def fake_search(query, *, source):
+        assert query == "artist exact"
+        assert source is wavelink.TrackSource.YouTube
+        return [failed, alternate]
+
+    monkeypatch.setattr(wavelink.Playable, "search", fake_search)
+
+    result = await search_youtube_alternative(
+        "artist exact",
+        "recovery",
+        exclude_uris={failed.uri},
+    )
+
+    assert result is alternate
+    assert dict(result.extras)["query"] == "artist exact"
 
 
 async def test_search_lavalink_keeps_custom_prefix_and_limits_results(monkeypatch, fake_track_factory) -> None:

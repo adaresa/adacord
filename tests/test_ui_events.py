@@ -1235,6 +1235,65 @@ async def test_track_exception_replays_current_track_without_consuming_queue(mon
     ]
 
 
+async def test_track_exception_uses_alternate_for_youtube_login_rejection(monkeypatch) -> None:
+    failed = FakeTrack("Failed", author="Artist")
+    failed.extras = {"query": "artist failed"}
+    replacement = FakeTrack("Replacement", author="Artist")
+    player = FakePlayer(current=failed, playing=True)
+    calls = []
+
+    async def fake_alternative(query, requester, *, exclude_uris):
+        calls.append(("alternative", query, requester, exclude_uris))
+        return replacement
+
+    async def fake_update(guild_id, seen_player):
+        calls.append(("update", guild_id, seen_player))
+
+    async def fake_save(seen_player):
+        calls.append(("save", seen_player))
+
+    monkeypatch.setattr(events, "search_youtube_alternative", fake_alternative)
+    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(events, "save_player_state", fake_save)
+
+    exception = "All clients failed to load the item. Client [WEB] failed: This video requires login."
+    await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception=exception))
+
+    assert player.current is replacement
+    assert dict(failed.extras)[events.RECOVERY_ATTEMPTED_EXTRA] is True
+    assert dict(replacement.extras)[events.RECOVERY_ATTEMPTED_EXTRA] is True
+    assert calls == [
+        ("alternative", "artist failed", events.RECOVERY_REQUESTER, {failed.uri}),
+        ("update", player.guild.id, player),
+        ("save", player),
+    ]
+
+
+async def test_track_exception_does_not_retry_a_recovery_track(monkeypatch) -> None:
+    failed = FakeTrack("Failed")
+    failed.extras = {events.RECOVERY_ATTEMPTED_EXTRA: True}
+    player = FakePlayer(current=failed, playing=True)
+    calls = []
+
+    async def fake_search(query, requester, *, limit=None):
+        calls.append(("search", query, requester, limit))
+        return [FakeTrack("Unexpected")]
+
+    async def fake_save(seen_player, *, current, queued, position, paused):
+        calls.append(("preserve", current))
+
+    async def fake_update(guild_id, seen_player):
+        calls.append(("update", guild_id))
+
+    monkeypatch.setattr(events, "search_lavalink", fake_search)
+    monkeypatch.setattr(events, "save_preserved_player_state", fake_save)
+    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
+
+    await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception="expired stream"))
+
+    assert calls == [("preserve", failed), ("update", player.guild.id)]
+
+
 async def test_track_stuck_preserves_failed_track_and_queue_when_recovery_errors(monkeypatch) -> None:
     failed = FakeTrack("Failed")
     queued = [FakeTrack("Next")]

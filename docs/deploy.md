@@ -37,7 +37,7 @@ Optional: enable the playback watchdog profile on small private servers where au
 COMPOSE_PROFILES=watchdog
 ```
 
-The watchdog periodically asks Lavalink to perform a YouTube Music `loadtracks` search. If that playback-path probe fails three times in a row, it restarts `yt-cipher`, Lavalink, and the bot. Probe failure logs include the returned Lavalink `loadType` and a short response excerpt for diagnosis.
+The watchdog checks YouTube search once a minute and opens a small media sample from up to three results. If that real playback-path probe fails three times in a row, it restarts `yt-cipher`, Lavalink, and the bot. Probe failure logs include the returned Lavalink `loadType` or a compact stream error for diagnosis.
 
 ## GitHub Actions Secrets
 
