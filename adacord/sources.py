@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Iterable
 from urllib.error import URLError
@@ -12,11 +13,10 @@ from urllib.request import Request, urlopen
 import wavelink
 
 from adacord.utils import (
-    avoid_terms_for_query,
+    AVOID_TERMS,
+    display_track_author,
     display_track_title,
     is_url,
-    normalized_words,
-    requested_variant_terms,
     spotify_playlist_id,
     text_contains_term,
     youtube_watch_url_without_playlist,
@@ -32,16 +32,6 @@ SONG_IDEAL_MAX_LENGTH_MS = 7 * 60_000
 SONG_SOFT_MAX_LENGTH_MS = 10 * 60_000
 SPOTIFY_PUBLIC_FETCH_TIMEOUT = 10
 
-SONG_HINT_TERMS = {
-    "audio",
-    "lyrics",
-    "lyric",
-    "official audio",
-    "official lyric",
-    "provided to youtube",
-    "topic",
-}
-
 
 @dataclass(frozen=True)
 class LoadSummary:
@@ -55,7 +45,7 @@ def apply_requester(tracks: Iterable[wavelink.Playable], requester: str, query: 
         track.extras = {
             "requester": requester,
             "query": query,
-            "display_title": display_track_title(track, query),
+            "display_title": display_track_title(track, query if is_url(query) else song_search_query(query)),
         }
 
 
@@ -65,27 +55,72 @@ def track_text(track: wavelink.Playable) -> str:
     return f"{title} {author}".lower()
 
 
-def track_source_text(track: wavelink.Playable) -> str:
-    source = getattr(track, "source", "") or ""
-    return str(source).lower()
+def song_search_text(value: str) -> str:
+    # Match decorated Unicode text and hyphenated variants such as "sped-up".
+    value = unicodedata.normalize("NFKD", value).casefold()
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r"[\W_]+", " ", value).strip()
 
 
-def score_song_candidate(track: wavelink.Playable, query: str) -> int:
-    text = track_text(track)
+SEARCH_DECORATIONS = {"official", "audio", "lyrics", "lyric", "video", "hd", "hq", "4k"}
+VARIANT_ALIASES = {
+    "unplugged": "acoustic",
+    "spedup": "sped up",
+    "speed up": "sped up",
+    "rem x": "remix",
+    "12 mix": "extended",
+}
+
+
+def song_variants(text: str) -> set[str]:
+    for alias, canonical in VARIANT_ALIASES.items():
+        text = re.sub(rf"\b{re.escape(alias)}\b", canonical, text)
+    return {term for term in AVOID_TERMS if text_contains_term(text, term)}
+
+
+def song_search_query(query: str) -> str:
+    """Do not send negated versions as positive search terms to the provider."""
+    terms = sorted(AVOID_TERMS | VARIANT_ALIASES.keys(), key=len, reverse=True)
+    versions = "|".join(r"[\s-]+".join(re.escape(word) for word in term.split()) for term in terms)
+    query = re.sub(rf"\b(?:no|not|without)\s+(?:{versions})\b", " ", query, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", query).strip()
+
+
+def score_song_candidate(
+    track: wavelink.Playable, query: str, *, explicit_artist: bool = False,
+) -> int:
+    title = song_search_text(getattr(track, "title", "") or "")
+    text = song_search_text(track_text(track))
+    query = song_search_text(song_search_query(query))
+    requested = song_variants(query)
+    # Remove an artist prefix before looking for versions: "Live - Lightning
+    # Crashes" is a band credit, not a live performance.
+    artist = song_search_text(display_track_author(track))
+    version_title = title
+    artist_requests = set()
+    if artist and title.startswith(artist + " "):
+        version_title = title[len(artist):].strip()
+        artist_requests = requested & song_variants(artist)
+    variants = song_variants(version_title)
+    ignored = SEARCH_DECORATIONS | {word for term in requested for word in term.split()}
+    ignored.update(word for alias, term in VARIANT_ALIASES.items() if term in requested for word in alias.split())
+    query_words = set(query.split()) - ignored
+    track_words = set(text.split())
     score = 0
-
-    query_words = normalized_words(query)
-    track_words = normalized_words(text)
     if query_words:
-        score += int(40 * len(query_words & track_words) / len(query_words))
+        score += int(100 * len(query_words & track_words) / len(query_words))
+        # A complete song title can be accompanied by movie/album context in
+        # the request that is absent from the upload's metadata.
+        core_title = re.split(r"[\(\[|]", getattr(track, "title", "") or "", maxsplit=1)[0]
+        core_words = set(song_search_text(core_title).split()) - SEARCH_DECORATIONS
+        if not explicit_artist and core_words and core_words <= query_words:
+            score = 100
 
-    if any(text_contains_term(text, term) for term in SONG_HINT_TERMS):
-        score += 20
-    if track_source_text(track) in {"youtube music", "youtubemusic", "ytm"}:
-        score += 10
+    # Provider order carries relevance/popularity information we do not have.
+    # Generic upload labels (or words in an artist name) must not override it.
 
     length = getattr(track, "length", None)
-    if length:
+    if length and not requested & {"extended", "hour", "hours", "loop", "looped"}:
         if SONG_MIN_LENGTH_MS <= length <= SONG_IDEAL_MAX_LENGTH_MS:
             score += 25
         elif length <= SONG_SOFT_MAX_LENGTH_MS:
@@ -93,10 +128,17 @@ def score_song_candidate(track: wavelink.Playable, query: str) -> int:
         else:
             score -= min(50, (length - SONG_SOFT_MAX_LENGTH_MS) // 60_000 * 5 + 15)
 
-    avoid_hits = [term for term in avoid_terms_for_query(query) if text_contains_term(text, term)]
-    score -= 30 * len(avoid_hits)
-    variant_hits = [term for term in requested_variant_terms(query) if text_contains_term(text, term)]
-    score += 25 * len(variant_hits)
+    allowed = set(requested)
+    if requested & {"slowed", "reverb"}:
+        allowed.update({"slowed", "reverb"})
+    if requested & {"extended", "remix", "nightcore"}:
+        allowed.add("mix")
+    if "acoustic" in requested:
+        allowed.add("live")
+    score -= 40 * len(variants - allowed)
+    score -= 25 * len(requested - variants - artist_requests)
+    if getattr(track, "is_stream", False):
+        score -= 100
     return score
 
 
@@ -108,24 +150,26 @@ def choose_best_song_candidate(
     if not candidates:
         return None
 
-    ranked = sorted(
-        enumerate(candidates),
-        key=lambda item: (score_song_candidate(item[1], query), -item[0]),
-        reverse=True,
+    query_words = set(song_search_text(query).split())
+    explicit_artist = any(
+        artist_words and artist_words <= query_words
+        for track in candidates
+        for artist_words in [set(song_search_text(display_track_author(track)).split())]
     )
-    best = ranked[0][1]
-    best_score = score_song_candidate(best, query)
-    first_score = score_song_candidate(candidates[0], query)
-
-    if best_score < -20 and first_score >= best_score - 10:
-        return candidates[0]
-    return best
+    # Preserve provider relevance against small metadata differences. Rerank
+    # only when a later result is meaningfully better, e.g. an original rather
+    # than a cover, or the version explicitly requested by the user.
+    return max(
+        enumerate(candidates),
+        key=lambda item: score_song_candidate(item[1], query, explicit_artist=explicit_artist) - 8 * item[0],
+    )[1]
 
 
 async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
-    source = None if is_url(query) else wavelink.TrackSource.YouTubeMusic
+    source = None if is_url(query) else wavelink.TrackSource.YouTube
+    provider_query = query if is_url(query) else song_search_query(query)
     try:
-        found = await wavelink.Playable.search(query, source=source)
+        found = await wavelink.Playable.search(provider_query, source=source)
     except Exception:
         fallback_query = youtube_watch_url_without_playlist(query)
         if not fallback_query:
@@ -133,6 +177,23 @@ async def search_youtube(query: str, requester: str) -> list[wavelink.Playable]:
         logger.info("Retrying YouTube watch URL without playlist parameters: %s", fallback_query)
         found = await wavelink.Playable.search(fallback_query, source=source)
         query = fallback_query
+
+    if not is_url(query) and not isinstance(found, wavelink.Playlist):
+        # Soundtrack searches can lead with a multilingual video compilation.
+        # Ask the music catalogue for a normal recording in that case.
+        multilingual = {"multi language", "multilingual"}
+        first_variants = song_variants(song_search_text(found[0].title)) if found else set()
+        unwanted_language = (first_variants - song_variants(song_search_text(provider_query))) & multilingual
+        if not found or unwanted_language:
+            try:
+                music = await wavelink.Playable.search(provider_query, source=wavelink.TrackSource.YouTubeMusic)
+            except Exception:
+                if not found:
+                    raise
+                logger.info("Music catalogue fallback unavailable; keeping YouTube results")
+                music = []
+            if music:
+                found = music
 
     if isinstance(found, wavelink.Playlist):
         tracks = list(found.tracks)
@@ -153,7 +214,7 @@ async def search_youtube_alternative(
     exclude_uris: set[str],
 ) -> wavelink.Playable | None:
     """Return the best regular YouTube result not already rejected for playback."""
-    found = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+    found = await wavelink.Playable.search(song_search_query(query), source=wavelink.TrackSource.YouTube)
     if isinstance(found, wavelink.Playlist):
         candidates = list(found.tracks)
     else:
@@ -300,5 +361,5 @@ async def load_tracks(query: str, requester: str) -> tuple[list[wavelink.Playabl
         raise RuntimeError("Could not load that Spotify playlist.")
 
     tracks = await search_youtube(query, requester)
-    title = display_track_title(tracks[0], query) if tracks else query
+    title = display_track_title(tracks[0], query if is_url(query) else song_search_query(query)) if tracks else query
     return tracks, LoadSummary(title, len(tracks), "youtube")

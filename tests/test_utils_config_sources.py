@@ -93,11 +93,11 @@ def test_duration_formatting() -> None:
     assert format_duration(3_665_000) == "1:01:05"
 
 
-def test_song_candidate_prefers_song_like_result(fake_track_factory) -> None:
+def test_song_candidate_preserves_relevance_over_topic_label(fake_track_factory) -> None:
     generic = fake_track_factory("Daft Punk One More Time random upload", author="Some Channel")
     official = fake_track_factory("One More Time", author="Daft Punk - Topic")
 
-    assert choose_best_song_candidate([generic, official], "daft punk one more time") is official
+    assert choose_best_song_candidate([generic, official], "daft punk one more time") is generic
 
 
 def test_song_candidate_avoids_extended_result(fake_track_factory) -> None:
@@ -112,6 +112,56 @@ def test_song_candidate_allows_requested_variant_terms(fake_track_factory) -> No
     original = fake_track_factory("One More Time lyrics", author="Daft Punk")
 
     assert choose_best_song_candidate([remix, original], "daft punk one more time remix") is remix
+
+
+def test_janice_stfu_preserves_drake_from_live_search_results(fake_track_factory) -> None:
+    # Production ytmsearch order captured on 2026-09-07. The old ranker selected
+    # Tha Audio Unit solely because the artist name contained "Audio".
+    results = [
+        ("Janice STFU", "Drake", 238_000),
+        ("Janice STFU", "KAYLA KING", 186_000),
+        ("Janice STFU (Instrumental Cover) (feat. RVNI PLUG)", "Rio Marlow", 223_000),
+        ("Janice STFU (Chopped & Screwed)", "Tha Audio Unit", 374_000),
+        ("Janice STFU (Techno)", "CARA", 103_000),
+        ("Janice STFU", "Gina Fiona", 223_000),
+        ("Janice STFU", "Strings From Paris", 169_000),
+        ("Janice STFU (Extended Mix)", "DAXTX", 156_000),
+    ]
+    tracks = [fake_track_factory(title, author=artist, length=length, source="youtube")
+              for title, artist, length in results]
+    assert choose_best_song_candidate(tracks, "Janice STFU") is tracks[0]
+    assert choose_best_song_candidate(tracks, "Janice STFU chopped screwed") is tracks[3]
+
+
+@pytest.mark.parametrize("label", ["Lyrics", "Official Audio", "Official Music Video"])
+def test_upload_labels_do_not_displace_first_matching_song(fake_track_factory, label) -> None:
+    original = fake_track_factory("Drake - Janice STFU", author="Drake")
+    upload = fake_track_factory(f"Drake - Janice STFU ({label})", author="Lyrics Topic")
+    assert choose_best_song_candidate([original, upload], "Janice STFU") is original
+
+
+@pytest.mark.parametrize("variant", [
+    "Cover", "Sped-Up", "Chopped & Screwed", "Acoustic", "Clean", "Techno",
+    "𝕊𝕝𝕠𝕨𝕖𝕕", "Instrumental", "Remix",
+])
+def test_song_versions_are_selected_only_when_requested(fake_track_factory, variant) -> None:
+    edit = fake_track_factory(f"Janice STFU ({variant})", author="Drake")
+    original = fake_track_factory("Janice STFU", author="Drake")
+    assert choose_best_song_candidate([edit, original], "Janice STFU") is original
+    assert choose_best_song_candidate([original, edit], f"Janice STFU {variant}") is edit
+
+
+def test_artist_and_title_match_beats_partial_match_with_labels(fake_track_factory) -> None:
+    wrong_artist = fake_track_factory("Janice STFU (Official Audio)", author="Other - Topic")
+    wrong_title = fake_track_factory("Janice (Lyrics)", author="Drake")
+    original = fake_track_factory("Janice STFU", author="Drake")
+    assert choose_best_song_candidate([wrong_artist, wrong_title, original], "Drake Janice STFU") is original
+
+
+def test_artist_name_is_not_treated_as_version(fake_track_factory) -> None:
+    original = fake_track_factory("Song", author="Live")
+    other = fake_track_factory("Song", author="Other")
+    assert choose_best_song_candidate([original, other], "Song") is original
 
 
 def test_display_title_keeps_requested_variant_visible(fake_track_factory) -> None:
@@ -272,7 +322,7 @@ async def test_url_search_retries_youtube_watch_url_without_playlist(monkeypatch
     assert track.extras["query"] == "https://www.youtube.com/watch?v=uwTw63tTNeI"
 
 
-async def test_search_youtube_uses_youtube_music_for_terms(monkeypatch, fake_track_factory) -> None:
+async def test_search_youtube_uses_regular_youtube_for_terms(monkeypatch, fake_track_factory) -> None:
     first = fake_track_factory("Generic upload", author="Some Channel")
     best = fake_track_factory("One More Time", author="Daft Punk - Topic")
     calls = []
@@ -286,7 +336,7 @@ async def test_search_youtube_uses_youtube_music_for_terms(monkeypatch, fake_tra
     tracks = await search_youtube("daft punk one more time", "tester")
 
     assert tracks == [best]
-    assert calls == [("daft punk one more time", wavelink.TrackSource.YouTubeMusic)]
+    assert calls == [("daft punk one more time", wavelink.TrackSource.YouTube)]
 
 
 async def test_search_youtube_handles_empty_results(monkeypatch) -> None:
