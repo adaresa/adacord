@@ -19,7 +19,7 @@ Most Discord music bots are either hosted services with feature limits behind pa
 
 - Persistent Discord player panel with clickable controls
 - YouTube URL and search playback
-- Spotify playlist links resolved through public metadata and YouTube Music search
+- Spotify playlist links resolved through public metadata and YouTube search
 - Queue, skip, pause, resume, clear, shuffle, remove, move, loop, volume, and disconnect commands
 - Playback session state stored locally under `./data`
 - Docker Compose stack with bot, Lavalink, and YouTube cipher services

@@ -25,6 +25,23 @@ AVOID_TERMS = {
     "slowed",
     "reverb",
     "remix",
+    "cover",
+    "tribute",
+    "acoustic",
+    "sped up",
+    "speed up",
+    "chopped",
+    "screwed",
+    "techno",
+    "8d",
+    "acapella",
+    "a cappella",
+    "clean",
+    "demo",
+    "snippet",
+    "clip",
+    "multi language",
+    "multilingual",
 }
 
 
