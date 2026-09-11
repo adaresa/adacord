@@ -54,7 +54,14 @@ jobs:
             set -eu
             cd "$APP_DIR"
             git fetch origin main
+            lavalink_changed=false
+            if ! git diff --quiet HEAD origin/main -- lavalink/application.yml; then
+              lavalink_changed=true
+            fi
             git reset --hard origin/main
             docker compose pull bot
+            if [ "$lavalink_changed" = true ]; then
+              docker compose up -d --no-deps --force-recreate --wait lavalink
+            fi
             docker compose up -d --no-deps bot
           EOF
