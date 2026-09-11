@@ -59,13 +59,19 @@ Merging to `main` runs CI. If the push passes, `.github/workflows/deploy.yml` co
 ```bash
 cd /opt/adacord
 git fetch origin main
+# Before resetting, check whether lavalink/application.yml changed.
 git reset --hard origin/main
-docker compose pull
-docker compose up -d --force-recreate
-docker image prune -f
+docker compose pull bot
+# Only when Lavalink configuration changed:
+docker compose up -d --no-deps --force-recreate --wait lavalink
+docker compose up -d --no-deps bot
 ```
 
 The `.env` file and `./data` directory are untracked, so configuration and playback recovery state remain on the server across deploys.
+
+Lavalink configuration updates interrupt active audio, so schedule those releases between listening sessions. Ordinary bot updates leave Lavalink and the cipher running. Deployments do not prune shared Docker images.
+
+The YouTube plugin is pinned to upstream commit `f45bbb7aebfcbc1c553769e04af6cd43afa8b7c3`, which fixes premature EOF when YouTube omits the total content length ([upstream #235](https://github.com/lavalink-devs/youtube-source/pull/235)). Version 1.18.2 can stop valid tracks at the first byte-range boundary, including immediately after seeking. Before replacing this pin, verify actual decoding past that boundary and through the end of the track; a metadata lookup or short stream sample does not cover this failure.
 
 ## YouTube OAuth
 

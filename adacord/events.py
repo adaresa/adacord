@@ -16,7 +16,7 @@ from adacord.recovery import restore_guild_playback_state
 from adacord.sources import search_lavalink, search_youtube_alternative
 from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
-from adacord.utils import compact_log_value, track_log_label
+from adacord.utils import compact_log_value, is_url, track_log_label
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +245,10 @@ async def recover_failed_track(
         )
         return False
 
+    # A direct link is an exact upload request, not permission to substitute a song.
+    original_query = str(track_extra(failed_track, "query") or "")
+    if is_url(original_query):
+        use_alternative = False
     mark_track_recovery_attempted(failed_track)
     query = alternate_recovery_query(failed_track) if use_alternative else track_recovery_query(failed_track)
     if not query:
@@ -309,7 +313,7 @@ async def handle_track_exception(payload: wavelink.TrackExceptionEventPayload) -
             volume=volume,
             use_alternative=youtube_playback_rejected(payload.exception),
         ):
-            logger.info("Recovered failed track for guild %s without consuming queue", player.guild.id)
+            logger.info("Submitted track recovery for guild %s without consuming queue", player.guild.id)
             await update_display_for_guild(player.guild.id, player)
             await save_player_state(player)
             return
