@@ -319,7 +319,10 @@ async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
         volume,
         track_log_label(track),
     )
-    await player.play(track, volume=volume)
+    extras = dict(track.extras)
+    start = extras.pop("requested_start_ms", 0)
+    await player.play(track, volume=volume, start=start)
+    track.extras = extras
     logger.info(
         "Lavalink play call completed for guild %s: current=%s queue_after=%s playing=%s paused=%s",
         player.guild.id,

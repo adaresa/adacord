@@ -11,7 +11,7 @@ from adacord.player import add_tracks, play_next
 from adacord.recommendations import clear_guild_recommendation_cache
 from adacord.sources import LoadSummary, load_tracks
 from adacord.state import get_guild_state
-from adacord.utils import compact_log_value, track_log_label
+from adacord.utils import compact_log_value, track_log_label, youtube_start_position
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,14 @@ async def queue_track_request(
             compact_log_value(query, limit=160),
         )
         return TrackRequestResult([], summary, False)
+
+    start = youtube_start_position(query)
+    if start:
+        track = tracks[0]
+        length = getattr(track, "length", 0) or 0
+        if getattr(track, "is_stream", False) or (length and start >= length):
+            raise TrackRequestLoadError("That start time is outside the playable track.")
+        track.extras = {**dict(track.extras), "requested_start_ms": start}
 
     was_idle = not player.current and player.queue.is_empty
     try:

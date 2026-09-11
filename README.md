@@ -142,7 +142,7 @@ YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
 
 | Command | Description |
 | --- | --- |
-| `/play <query>` or `/p <query>` | Play a YouTube URL/search or Spotify playlist link |
+| `/play <query>` or `/p <query>` | Play a YouTube URL/search or Spotify playlist link; YouTube timestamps such as `&t=241s` start at 4:01, including when queued |
 | `/disconnect` or `/dc` | Disconnect from voice |
 | `/remove <position>` | Remove a queued track |
 | `/move <from_pos> <to_pos>` | Move a queued track |
