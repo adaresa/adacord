@@ -49,6 +49,25 @@ def is_url(value: str) -> bool:
     return urlparse(value).scheme in {"http", "https"}
 
 
+def youtube_start_position(value: str) -> int:
+    """Read a YouTube link's start time in milliseconds before URL normalization."""
+    parsed = urlparse(value.strip())
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+        "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
+    }:
+        return 0
+    params = parse_qs(parsed.query)
+    fragment = parse_qs(parsed.fragment)
+    stamp = (params.get("t") or params.get("start") or fragment.get("t") or [""])[0]
+    if re.fullmatch(r"[0-9]{1,8}", stamp):
+        return int(stamp) * 1000
+    match = re.fullmatch(r"(?:(\d{1,5})h)?(?:(\d{1,5})m)?(?:(\d{1,5})s)?", stamp)
+    if not match:
+        return 0
+    hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return (hours * 3600 + minutes * 60 + seconds) * 1000
+
+
 def youtube_watch_url_without_playlist(value: str) -> str | None:
     parsed = urlparse(value.strip())
     if parsed.scheme not in {"http", "https"}:
