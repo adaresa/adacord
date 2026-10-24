@@ -1355,3 +1355,18 @@ async def test_inactive_player_removes_display_and_clears_saved_state(monkeypatc
 
     assert calls == [("update", player.guild.id, None)]
     assert clears == [player.guild.id]
+
+
+async def test_resume_starts_waiting_queue_without_current_track(monkeypatch) -> None:
+    player = FakePlayer(paused=True, queue=FakeQueue([FakeTrack("Waiting")]))
+    async def update(guild_id, seen_player):
+        pass
+    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
+    monkeypatch.setattr(ui, "update_display_for_guild", update)
+    model = ui.build_player_panel_model(player, player.guild.id)
+    assert model.disabled["pause_resume"] is False
+    assert model.pause_label == "Resume"
+    view = ui.PlayerPanelView(player.guild.id, model)
+    await view.pause_resume(FakeInteraction(guild=player.guild))
+    assert player.current.title == "Waiting"
+    assert player.paused is False

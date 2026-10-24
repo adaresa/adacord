@@ -9,7 +9,7 @@ from discord.ext import commands
 import wavelink
 
 from adacord.persistence import load_state, save_player_state, track_from_payload
-from adacord.player import MissingVoicePermissions, ensure_player, set_loop_mode
+from adacord.player import MissingVoicePermissions, ensure_player, play_next, set_loop_mode
 from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
 from adacord.utils import track_log_label
@@ -168,6 +168,8 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
             add_history=False,
         )
         state.paused_at = time.monotonic() if bool(saved.get("paused")) else None
+    elif queued_tracks:
+        await play_next(player)
 
     await update_display_for_guild(guild_id, player)
     await save_player_state(player)

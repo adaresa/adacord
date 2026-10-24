@@ -17,6 +17,7 @@ from adacord.player import (
     clear_player,
     ensure_player,
     get_player,
+    play_next,
     queue_items,
     reconnect_player_voice,
     set_loop_mode,
@@ -256,11 +257,11 @@ def build_player_panel_model(
         queue_count=len(tracks),
         queue_preview=build_queue_preview(player),
         suggestions=suggestions,
-        pause_label="Resume" if bool(player and player.paused) else "Pause",
+        pause_label="Resume" if bool(player and player.paused) or (tracks and not current) else "Pause",
         mute_label="Unmute" if volume == 0 else "Mute",
         disabled=MappingProxyType({
             "restart": not bool(current),
-            "pause_resume": not bool(current),
+            "pause_resume": not has_music,
             "skip": not bool(current),
             "stop": not has_music,
             "volume_down": not has_music or volume <= 0,
@@ -481,8 +482,14 @@ class PlayerPanelView(discord.ui.LayoutView):
 
     async def pause_resume(self, interaction: discord.Interaction) -> None:
         player = player_for_interaction(interaction)
-        if not player or not player.current:
+        if not player or (not player.current and player.queue.is_empty):
             await respond(interaction, "Nothing to pause or resume.", ephemeral=True)
+            return
+        if not player.current:
+            await acknowledge(interaction)
+            await play_next(player)
+            await save_player_state(player)
+            await self.refresh(interaction)
             return
         should_pause = not player.paused
         state = get_guild_state(player.guild.id)

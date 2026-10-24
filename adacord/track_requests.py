@@ -94,7 +94,7 @@ async def queue_track_request(
         if play_first and not was_idle:
             for index, track in enumerate(tracks):
                 player.queue.put_at(index, track)
-            if not player.playing and not player.paused:
+            if not player.current:
                 await play_next(player)
         else:
             await add_tracks(player, tracks)
