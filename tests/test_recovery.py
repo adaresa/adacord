@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from adacord import recovery
+from adacord.persistence import load_state
 from adacord.state import get_guild_state
 from conftest import FakeGuild, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack, FakeVoiceChannel
 
@@ -97,6 +98,11 @@ async def test_restore_guild_playback_state_reconnects_and_restores_player(monke
     assert state.paused_at is not None
     assert player.play_kwargs[-1]["start"] == 30_000
     assert updates == [(guild.id, player)]
+    # FakePlayer, like Wavelink before its first position update, still reports zero.
+    assert player.position == 0
+    saved = load_state()["guilds"][str(guild.id)]
+    assert saved["position"] == 30_000
+    assert saved["paused"] is True
 
 
 async def test_restore_guild_playback_state_skips_missing_voice_channel(monkeypatch) -> None:
