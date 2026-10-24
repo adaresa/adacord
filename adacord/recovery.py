@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands
 import wavelink
 
-from adacord.persistence import load_state, save_player_state, track_from_payload
+from adacord.persistence import load_state, save_player_state, save_preserved_player_state, track_from_payload
 from adacord.player import MissingVoicePermissions, ensure_player, play_next, set_loop_mode
 from adacord.state import get_guild_state
 from adacord.ui import update_display_for_guild
@@ -172,5 +172,16 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
         await play_next(player)
 
     await update_display_for_guild(guild_id, player)
-    await save_player_state(player)
+    if current_track and player.current is current_track:
+        # Wavelink reports zero until Lavalink sends a position update. Keep the
+        # requested restore offset instead of overwriting it with that placeholder.
+        await save_preserved_player_state(
+            player,
+            current=current_track,
+            queued=list(player.queue),
+            position=player.position or start,
+            paused=bool(player.paused),
+        )
+    else:
+        await save_player_state(player)
     logger.info("Restored playback state for guild %s", guild_id)
