@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import wavelink
 
+from adacord.persistence import load_state
 from adacord.player import (
     MissingVoicePermissions,
     add_tracks,
@@ -41,6 +42,32 @@ async def test_add_tracks_can_queue_without_starting() -> None:
     assert player.current is None
     assert player.play_calls == []
     assert list(player.queue) == tracks
+
+
+async def test_clear_paused_player_then_add_tracks_starts_playback() -> None:
+    player = FakePlayer(current=FakeTrack("Old"), paused=True)
+    await clear_player(player)
+    assert player.paused is False
+    assert player.connected is True
+    track = FakeTrack("New")
+    await add_tracks(player, [track])
+    assert player.current is track
+    assert player.paused is False
+
+
+async def test_add_tracks_recovers_orphaned_pause_without_interrupting_paused_track() -> None:
+    player = FakePlayer(paused=True, queue=FakeQueue([FakeTrack("Waiting")]))
+    await add_tracks(player, [FakeTrack("New")])
+    assert player.current.title == "Waiting"
+    assert player.play_kwargs[-1]["paused"] is False
+    assert player.paused is False
+
+    current = player.current
+    await player.pause(True)
+    await add_tracks(player, [FakeTrack("Later")])
+    assert player.current is current
+    assert player.paused is True
+    assert len(player.play_calls) == 1
 
 
 async def test_add_tracks_does_not_interrupt_active_player() -> None:
@@ -103,10 +130,135 @@ async def test_reconnect_player_voice_preserves_playback_state() -> None:
     assert old_player.disconnect_calls == 1
     assert new_player.volume == 80
     assert new_player.current is current
-    assert new_player.play_kwargs[-1] == {"start": 45_000, "add_history": False}
+    assert new_player.play_kwargs[-1] == {"start": 45_000, "add_history": False, "paused": False}
     assert list(new_player.queue) == [queued]
     assert new_player.queue.mode == wavelink.QueueMode.loop_all
     assert state.voice_refresh_in_progress is False
+
+
+@pytest.mark.parametrize("failure", [wavelink.ChannelTimeoutException, TimeoutError])
+async def test_ensure_player_retries_timeout_with_clean_voice_client(monkeypatch, failure) -> None:
+    guild = FakeGuild()
+    channel = FakeVoiceChannel(guild=guild)
+    attempts = []
+
+    async def connect(**kwargs):
+        assert get_guild_state(guild.id).connect_lock.locked()
+        assert guild.voice_client is None
+        player = FakePlayer(guild=guild)
+        player.channel = channel
+        attempts.append(player)
+        if len(attempts) == 1:
+            raise failure("voice handshake timed out")
+        return player
+
+    monkeypatch.setattr(channel, "connect", connect)
+    result = await ensure_player(guild, channel)
+
+    assert len(attempts) == 2
+    assert attempts[0].disconnect_calls == 1
+    assert result is attempts[1]
+    assert guild.voice_client is result
+    assert not get_guild_state(guild.id).connect_lock.locked()
+
+
+@pytest.mark.parametrize("failure, expected_attempts", [
+    (wavelink.ChannelTimeoutException, 2),
+    (RuntimeError, 1),
+    (asyncio.CancelledError, 1),
+])
+async def test_failed_ensure_player_cleans_up_and_releases_lock(monkeypatch, failure, expected_attempts) -> None:
+    guild = FakeGuild()
+    channel = FakeVoiceChannel(guild=guild)
+    attempts = []
+
+    async def connect(**kwargs):
+        assert guild.voice_client is None
+        attempts.append(FakePlayer(guild=guild))
+        raise failure("connection failed")
+
+    monkeypatch.setattr(channel, "connect", connect)
+    with pytest.raises(failure):
+        await ensure_player(guild, channel)
+
+    assert len(attempts) == expected_attempts
+    assert all(player.disconnect_calls == 1 for player in attempts)
+    assert guild.voice_client is None
+    assert not get_guild_state(guild.id).connect_lock.locked()
+
+
+@pytest.mark.parametrize("failure", [wavelink.ChannelTimeoutException, TimeoutError])
+async def test_voice_refresh_retries_timeout_and_restores_tracks(monkeypatch, failure) -> None:
+    guild = FakeGuild()
+    current = FakeTrack("Current")
+    current.position = 45_000
+    queued = FakeTrack("Next")
+    old = FakePlayer(guild=guild, current=current, queue=FakeQueue([queued]), paused=True, volume=80)
+    channel = FakeVoiceChannel(guild=guild)
+    old.channel = channel
+    state = get_guild_state(guild.id)
+    state.loop_mode = "queue"
+    attempts = []
+
+    async def connect(**kwargs):
+        assert state.voice_refresh_in_progress
+        assert guild.voice_client is None
+        player = FakePlayer(guild=guild)
+        player.channel = channel
+        attempts.append(player)
+        if len(attempts) == 1:
+            raise failure("voice handshake timed out")
+        return player
+
+    monkeypatch.setattr(channel, "connect", connect)
+    result = await reconnect_player_voice(old)
+
+    assert len(attempts) == 2
+    assert attempts[0].disconnect_calls == 1
+    assert result.current is current
+    assert result.play_kwargs == [{"start": 45_000, "add_history": False, "paused": False}]
+    assert list(result.queue) == [queued]
+    assert result.volume == 80
+    assert result.queue.mode == wavelink.QueueMode.loop_all
+    assert not state.voice_refresh_in_progress
+
+
+@pytest.mark.parametrize("failure, expected_attempts", [
+    (wavelink.ChannelTimeoutException, 2),
+    (RuntimeError, 1),
+    (asyncio.CancelledError, 1),
+])
+async def test_failed_voice_refresh_cleans_up_and_keeps_saved_state(monkeypatch, failure, expected_attempts) -> None:
+    guild = FakeGuild()
+    current = FakeTrack("Current")
+    current.position = 45_000
+    old = FakePlayer(guild=guild, current=current, queue=FakeQueue([FakeTrack("Next")]), paused=True, volume=80)
+    channel = FakeVoiceChannel(guild=guild)
+    old.channel = channel
+    attempts = []
+
+    async def connect(**kwargs):
+        assert guild.voice_client is None
+        player = FakePlayer(guild=guild)
+        attempts.append(player)
+        raise failure("connection failed")
+
+    monkeypatch.setattr(channel, "connect", connect)
+    with pytest.raises(failure):
+        await reconnect_player_voice(old)
+
+    assert len(attempts) == expected_attempts
+    assert all(player.disconnect_calls == 1 for player in attempts)
+    assert guild.voice_client is None
+    state = get_guild_state(guild.id)
+    assert not state.voice_refresh_in_progress
+    assert not state.connect_lock.locked()
+    saved = load_state()["guilds"][str(guild.id)]
+    assert saved["current"]["title"] == "Current"
+    assert saved["queue"][0]["title"] == "Next"
+    assert saved["position"] == 45_000
+    assert saved["volume"] == 80
+    assert saved["paused"] is True
 
 
 async def test_set_volume_clamps_values() -> None:

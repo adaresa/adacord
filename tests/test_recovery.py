@@ -15,6 +15,30 @@ class FakeBot:
         return self.guild if guild_id == self.guild.id else None
 
 
+async def test_restore_queue_without_current_starts_even_with_saved_pause(monkeypatch) -> None:
+    guild = FakeGuild()
+    player = FakePlayer(guild=guild)
+    channel = FakeVoiceChannel(guild=guild, player=player)
+
+    async def fetch(bot, channel_id):
+        return channel
+
+    async def update(guild_id, seen_player):
+        pass
+
+    monkeypatch.setattr(recovery, "fetch_channel", fetch)
+    monkeypatch.setattr(recovery, "update_display_for_guild", update)
+    monkeypatch.setattr(recovery.discord, "VoiceChannel", FakeVoiceChannel)
+    monkeypatch.setattr(recovery.discord, "StageChannel", type("FakeStage", (), {}))
+    await recovery.restore_guild_playback_state(FakeBot(guild), guild.id, {
+        "voice_channel_id": channel.id, "current": None, "paused": True,
+        "queue": [saved_track(FakeTrack("First")), saved_track(FakeTrack("Second"))],
+    })
+    assert player.current.title == "First"
+    assert player.paused is False
+    assert [track.title for track in player.queue] == ["Second"]
+
+
 def saved_track(track: FakeTrack) -> dict:
     return {"raw_data": track.raw_data, "extras": track.extras, "title": track.title, "uri": track.uri}
 
