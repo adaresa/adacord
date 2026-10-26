@@ -95,6 +95,18 @@ async def handle_bot_voice_disconnect(
         track_log_label(player.current) if player else "none",
         len(list(player.queue)) if player else 0,
     )
+    if player is None:
+        # Wavelink removes its voice client after Discord disconnects the bot.
+        # A disk snapshot is not permission to rejoin after a server-side kick.
+        task = state.voice_reconnect_task
+        if task and not task.done():
+            task.cancel()
+        state.voice_reconnect_task = None
+        await clear_saved_guild_state(guild_id)
+        await update_display_for_guild(guild_id, None)
+        logger.info("Leaving voice disconnected for guild %s; cleared saved playback", guild_id)
+        return
+
     if player and (player.current or not player.queue.is_empty):
         await save_player_state(player)
 
@@ -122,6 +134,11 @@ async def handle_bot_voice_disconnect(
 async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
     player = payload.player
     if not player:
+        return
+    if not getattr(player, "connected", True):
+        # A retired player can emit a final stop after its replacement starts.
+        # It must not delete that player's display or overwrite its snapshot.
+        logger.info("Ignoring track end from disconnected player for guild %s", player.guild.id)
         return
     reason = str(getattr(payload, "reason", "") or "").lower()
     ended_track = getattr(payload, "track", None) or player.current

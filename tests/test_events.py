@@ -114,7 +114,7 @@ async def test_bot_voice_disconnect_schedules_reconnect_when_saved_music_exists(
     monkeypatch.setattr(events, "load_state", lambda: {"version": 1, "guilds": {str(guild.id): saved}})
     monkeypatch.setattr(events.asyncio, "create_task", fake_create_task)
 
-    await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id)
+    await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id, FakePlayer(guild=guild))
 
     assert len(scheduled) == 1
     assert get_guild_state(guild.id).voice_reconnect_task is not None
@@ -149,3 +149,34 @@ async def test_bot_voice_disconnect_saves_live_position_before_reconnect(monkeyp
 
     assert saves == [45_000]
     assert len(scheduled) == 1
+
+
+async def test_server_disconnect_does_not_resurrect_saved_music(monkeypatch) -> None:
+    guild = FakeGuild()
+    saved = {"voice_channel_id": 456, "current": saved_track(FakeTrack("Current")), "queue": []}
+    calls = []
+    state = get_guild_state(guild.id)
+
+    class PendingReconnect:
+        def done(self):
+            return False
+
+        def cancel(self):
+            calls.append("cancel")
+
+    state.voice_reconnect_task = PendingReconnect()
+
+    async def clear(guild_id):
+        calls.append(("clear", guild_id))
+
+    async def update(guild_id, player):
+        calls.append(("update", guild_id, player))
+
+    monkeypatch.setattr(events, "load_state", lambda: {"guilds": {str(guild.id): saved}})
+    monkeypatch.setattr(events, "clear_saved_guild_state", clear)
+    monkeypatch.setattr(events, "update_display_for_guild", update)
+
+    await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id)
+
+    assert calls == ["cancel", ("clear", guild.id), ("update", guild.id, None)]
+    assert state.voice_reconnect_task is None
