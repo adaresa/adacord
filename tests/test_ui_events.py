@@ -1143,6 +1143,28 @@ async def test_track_end_only_updates_display_when_queue_empty(monkeypatch) -> N
     assert calls == [("update", player.guild.id, player)]
 
 
+async def test_retired_player_track_end_preserves_replacement_display_and_state(monkeypatch) -> None:
+    player = FakePlayer(queue=FakeQueue([FakeTrack("Old queued track")]))
+    player.connected = False
+    state = get_guild_state(player.guild.id)
+    replacement_message = object()
+    state.display_message = replacement_message
+    calls = []
+
+    async def unexpected(*args):
+        calls.append(args)
+
+    monkeypatch.setattr(events, "play_next", unexpected)
+    monkeypatch.setattr(events, "update_display_for_guild", unexpected)
+    monkeypatch.setattr(events, "save_player_state", unexpected)
+
+    await events.handle_track_end(SimpleNamespace(player=player, reason="stopped"))
+
+    assert calls == []
+    assert state.display_message is replacement_message
+    assert len(list(player.queue)) == 1
+
+
 async def test_track_end_ignores_non_advancing_reasons(monkeypatch) -> None:
     queued = [FakeTrack("Next")]
     player = FakePlayer(queue=FakeQueue(queued))
