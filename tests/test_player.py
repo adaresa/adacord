@@ -20,7 +20,7 @@ from adacord.player import (
     set_volume,
 )
 from adacord.state import get_guild_state
-from conftest import FakeGuild, FakePlayer, FakeQueue, FakeTrack, FakeVoiceChannel
+from conftest import FakeGuild, FakeNode, FakePlayer, FakeQueue, FakeTrack, FakeVoiceChannel
 
 
 async def test_add_tracks_starts_playback_when_idle() -> None:
@@ -85,6 +85,37 @@ async def test_play_next_uses_default_volume_when_player_volume_is_missing() -> 
 
     assert await play_next(player) is track
     assert player.play_calls == [(track, 50)]
+
+
+async def test_play_next_leaves_an_active_track_playing() -> None:
+    current = FakeTrack("Current")
+    queued = FakeTrack("Queued")
+    player = FakePlayer(current=current, queue=FakeQueue([queued]))
+
+    assert await play_next(player) is None
+    assert player.current is current
+    assert player.play_calls == []
+    assert list(player.queue) == [queued]
+
+
+async def test_concurrent_play_next_calls_start_only_one_track() -> None:
+    first = FakeTrack("First")
+    second = FakeTrack("Second")
+    player = FakePlayer(queue=FakeQueue([first, second]), playing=False)
+
+    class SlowNode(FakeNode):
+        async def fetch_player_info(self, guild_id: int):
+            await asyncio.sleep(0)
+            return await super().fetch_player_info(guild_id)
+
+    player.node = SlowNode()
+
+    results = await asyncio.gather(play_next(player), play_next(player))
+
+    assert results == [first, None]
+    assert player.current is first
+    assert player.play_calls == [(first, 50)]
+    assert list(player.queue) == [second]
 
 
 async def test_ensure_player_rejects_missing_voice_permissions_before_connect() -> None:

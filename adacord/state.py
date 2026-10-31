@@ -16,6 +16,7 @@ class GuildState:
     loop_mode: str = "none"
     previous_volume: int = DEFAULT_VOLUME
     connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    advance_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     display_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     display_refresh_task: asyncio.Task[None] | None = None
     display_rate_limit_until: float = 0.0

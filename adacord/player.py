@@ -306,19 +306,38 @@ def has_next_track(player: wavelink.Player) -> bool:
     return not queue.is_empty
 
 
-async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
-    if not has_next_track(player):
-        logger.debug("play_next skipped for guild %s: queue is empty", player.guild.id)
-        return None
+def can_start_next_track(player: wavelink.Player) -> bool:
+    return player.current is None and has_next_track(player)
 
-    logger.debug(
-        "Starting next track for guild %s: current=%s queue_before=%s connected=%s",
-        player.guild.id,
-        track_log_label(player.current),
-        len(list(player.queue)),
-        player.connected,
-    )
-    await wait_for_lavalink_voice(player)
+
+async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
+    # Track end, /play, panel resume and recovery all advance the queue. Only start a
+    # track while the player is idle, so callers that race each other cannot pop two tracks.
+    async with get_guild_state(player.guild.id).advance_lock:
+        if not can_start_next_track(player):
+            logger.debug(
+                "play_next skipped for guild %s: current=%s queue=%s",
+                player.guild.id,
+                track_log_label(player.current),
+                len(list(player.queue)),
+            )
+            return None
+
+        logger.debug(
+            "Starting next track for guild %s: current=%s queue_before=%s connected=%s",
+            player.guild.id,
+            track_log_label(player.current),
+            len(list(player.queue)),
+            player.connected,
+        )
+        await wait_for_lavalink_voice(player)
+        if not can_start_next_track(player):
+            logger.debug("play_next skipped for guild %s: playback changed while waiting for voice", player.guild.id)
+            return None
+        return await _start_queued_track(player)
+
+
+async def _start_queued_track(player: wavelink.Player) -> wavelink.Playable:
     track = player.queue.get()
     volume = player.volume if player.volume is not None else default_volume()
     logger.debug(

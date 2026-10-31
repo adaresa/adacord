@@ -38,10 +38,12 @@ async def test_timestamp_reaches_play_once(monkeypatch, queued):
     await track_requests.queue_track_request(player, "https://youtu.be/8bCDdWSdMDM?t=241s", "tester")
     if queued:
         assert not player.play_calls
+        player.current = None  # Wavelink clears current when the playing track ends.
         await play_next(player)
     assert player.play_kwargs[-1]["start"] == 241000
     assert track.extras == {"requester": "tester"}
     player.queue = FakeQueue([track])
+    player.current = None
     await play_next(player)
     assert player.play_kwargs[-1]["start"] == 0
 
