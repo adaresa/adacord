@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
-from adacord import commands
+from adacord import commands, ui
 from adacord.sources import LoadSummary
-from adacord.state import get_guild_state
 from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, TrackRequestResult
 from conftest import (
     FakeGuild,
@@ -36,7 +33,7 @@ async def test_play_rejects_dm() -> None:
 
     await commands.play_impl(interaction, "song")
 
-    assert last_response_text(interaction) == "This command can only be used in a server."
+    assert last_response_text(interaction) == "This can only be used in a server."
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
@@ -54,7 +51,7 @@ async def test_join_rejects_dm() -> None:
 
     await commands.join_impl(interaction)
 
-    assert last_response_text(interaction) == "This command can only be used in a server."
+    assert last_response_text(interaction) == "This can only be used in a server."
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
@@ -72,15 +69,15 @@ async def test_join_rejects_missing_voice_permissions_before_defer(monkeypatch) 
     voice_channel = FakeVoiceChannel(
         guild=guild,
         permissions=SimpleNamespace(view_channel=True, connect=False, speak=False),
-        name="kassu bot testing",
+        name="Music",
     )
     interaction = FakeInteraction(guild=guild)
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: voice_channel)
 
     await commands.join_impl(interaction)
 
-    assert last_response_text(interaction) == "I need Connect and Speak permissions in kassu bot testing."
+    assert last_response_text(interaction) == "I need Connect and Speak permissions in Music."
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
     assert interaction.response.deferred is False
     assert voice_channel.connect_kwargs is None
@@ -102,15 +99,14 @@ async def test_join_connects_and_creates_idle_display(monkeypatch) -> None:
     async def fake_create_display(guild_id, seen_channel, seen_player, *, manage_refresh=True):
         calls.append((guild_id, seen_channel, seen_player, manage_refresh))
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
-    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: voice_channel)
+    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
     monkeypatch.setattr(commands, "create_or_update_display", fake_create_display)
 
     await commands.join_impl(interaction)
 
     assert interaction.response.deferred is True
     assert interaction.response.defer_kwargs == {"ephemeral": True, "thinking": True}
-    assert get_guild_state(guild.id).text_channel is channel
     assert calls == [(guild.id, channel, player, True)]
     assert interaction.deleted_original_response is True
     assert_no_text_response(interaction)
@@ -145,8 +141,8 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
         coro.close()
         return None
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
-    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: voice_channel)
+    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
     monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(commands, "create_or_update_display", fake_create_display)
     monkeypatch.setattr(commands.asyncio, "create_task", fake_create_task)
@@ -168,8 +164,8 @@ async def test_play_reports_connection_failure(monkeypatch) -> None:
     async def fake_ensure_player(guild, channel):
         raise RuntimeError("voice denied")
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
-    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: object())
+    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
 
     await commands.play_impl(interaction, "song")
 
@@ -183,15 +179,15 @@ async def test_play_rejects_missing_voice_permissions_before_defer(monkeypatch) 
     voice_channel = FakeVoiceChannel(
         guild=guild,
         permissions=SimpleNamespace(view_channel=True, connect=False, speak=False),
-        name="kassu bot testing",
+        name="Music",
     )
     interaction = FakeInteraction(guild=guild)
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: voice_channel)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: voice_channel)
 
     await commands.play_impl(interaction, "song")
 
-    assert last_response_text(interaction) == "I need Connect and Speak permissions in kassu bot testing."
+    assert last_response_text(interaction) == "I need Connect and Speak permissions in Music."
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
     assert interaction.response.deferred is False
     assert voice_channel.connect_kwargs is None
@@ -207,8 +203,8 @@ async def test_play_reports_load_failure(monkeypatch) -> None:
     async def fake_queue_track_request(player, query: str, requester: str):
         raise TrackRequestLoadError("source down")
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
-    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: object())
+    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
     monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
 
     await commands.play_impl(interaction, "song")
@@ -228,8 +224,8 @@ async def test_play_reports_playback_start_failure(monkeypatch) -> None:
     async def fake_queue_track_request(player, query: str, requester: str):
         raise TrackRequestPlaybackError("queue rejected")
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
-    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: object())
+    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
     monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
 
     await commands.play_impl(interaction, "song")
@@ -249,8 +245,8 @@ async def test_play_reports_empty_results_and_clears_deferred_response(monkeypat
     async def fake_queue_track_request(player, query: str, requester: str):
         return TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False)
 
-    monkeypatch.setattr(commands, "user_voice_channel", lambda interaction: object())
-    monkeypatch.setattr(commands, "ensure_player", fake_ensure_player)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: object())
+    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
     monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
 
     await commands.play_impl(interaction, "song")

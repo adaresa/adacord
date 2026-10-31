@@ -1,0 +1,22 @@
+# Keep secrets, local state, and dev tooling out of the bot image.
+.env
+.env.*
+data/
+logs/
+AGENTS.md
+
+.git/
+.github/
+.venv/
+.vscode/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+docs/
+tests/
+lavalink/
+scripts/
+docker-compose*.yml
+Dockerfile
+.dockerignore

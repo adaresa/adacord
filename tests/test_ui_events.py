@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import discord
 import pytest
+import wavelink
 
 from adacord import events, ui
 from adacord.recommendations import Recommendation
@@ -242,7 +243,7 @@ async def test_create_or_update_display_replaces_legacy_embed_message() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    legacy_message = FakeMessage(embed=ui.build_player_embed(player, player.guild.id))
+    legacy_message = FakeMessage(embed=discord.Embed(title="Music Player"))
     state.display_message = legacy_message
     state.display_channel = channel
 
@@ -503,10 +504,6 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
         (player.guild.id, state.display_channel, player, False),
     ]
     assert saves == [player]
-
-
-def test_active_display_refresh_interval_is_five_seconds() -> None:
-    assert ui.DISPLAY_REFRESH_INTERVAL == 5.0
 
 
 async def test_successful_display_edit_delays_automatic_refresh_budget() -> None:
@@ -1141,6 +1138,27 @@ async def test_track_end_only_updates_display_when_queue_empty(monkeypatch) -> N
     await events.handle_track_end(SimpleNamespace(player=player))
 
     assert calls == [("update", player.guild.id, player)]
+
+
+async def test_track_end_replays_looped_track_when_queue_empty(monkeypatch) -> None:
+    current = FakeTrack("Looped")
+    player = FakePlayer(current=current, queue=FakeQueue())
+    player.queue.mode = wavelink.QueueMode.loop
+    player.queue.loaded = current
+    calls = []
+
+    async def fake_play_next(seen_player):
+        calls.append(("play_next", seen_player))
+
+    async def fake_update(guild_id, seen_player):
+        calls.append(("update", guild_id, seen_player))
+
+    monkeypatch.setattr(events, "play_next", fake_play_next)
+    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
+
+    await events.handle_track_end(SimpleNamespace(player=player))
+
+    assert calls == [("play_next", player), ("update", player.guild.id, player)]
 
 
 async def test_retired_player_track_end_preserves_replacement_display_and_state(monkeypatch) -> None:

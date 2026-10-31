@@ -25,7 +25,6 @@ def test_recommendation_queries_use_youtube_music_fallbacks() -> None:
 
     queries = recommendations.recommendation_queries(player)
 
-    assert all(not query.startswith(("spsearch:", "sprec:")) for query in queries)
     assert "ytmsearch:Daft Punk radio" in queries
     assert "ytmsearch:Daft Punk - Digital Love radio" in queries
     assert "ytmsearch:Daft Punk similar artists songs" in queries

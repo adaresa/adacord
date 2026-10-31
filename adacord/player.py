@@ -7,13 +7,11 @@ import wavelink
 from adacord.persistence import clear_guild_state as clear_saved_guild_state
 from adacord.persistence import save_player_state
 from adacord.config import (
+    LAVALINK_PASSWORD,
+    LAVALINK_URI,
+    LAVALINK_VOICE_READY_INTERVAL,
+    LAVALINK_VOICE_READY_TIMEOUT,
     default_volume,
-    lavalink_connect_delay,
-    lavalink_connect_retries,
-    lavalink_password,
-    lavalink_uri,
-    lavalink_voice_ready_interval,
-    lavalink_voice_ready_timeout,
     player_idle_timeout,
     voice_connect_timeout,
 )
@@ -71,25 +69,12 @@ def validate_voice_channel_permissions(
 
 
 async def connect_lavalink(bot: discord.Client) -> None:
-    uri = lavalink_uri()
-    retries = lavalink_connect_retries()
-    delay = lavalink_connect_delay()
-    node = wavelink.Node(uri=uri, password=lavalink_password())
-    for attempt in range(1, retries + 1):
-        try:
-            await wavelink.Pool.connect(client=bot, nodes=[node], cache_capacity=100)
-            logger.info("Connected to Lavalink at %s", uri)
-            return
-        except Exception as exc:
-            logger.warning(
-                "Lavalink connection attempt %s/%s failed: %s",
-                attempt,
-                retries,
-                exc,
-            )
-            await asyncio.sleep(delay)
-
-    raise RuntimeError(f"Could not connect to Lavalink at {uri}")
+    node = wavelink.Node(uri=LAVALINK_URI, password=LAVALINK_PASSWORD)
+    # Wavelink keeps retrying an unreachable node and only logs a rejected password, so check the result.
+    nodes = await wavelink.Pool.connect(client=bot, nodes=[node], cache_capacity=100)
+    if node.identifier not in nodes:
+        raise RuntimeError(f"Could not connect to Lavalink at {LAVALINK_URI}; see the wavelink errors above.")
+    logger.info("Connected to Lavalink at %s", LAVALINK_URI)
 
 
 def get_player(guild: discord.Guild) -> wavelink.Player | None:
@@ -142,7 +127,7 @@ async def ensure_player(
     async with state.connect_lock:
         player = get_player(guild)
         if player and player.connected:
-            logger.info(
+            logger.debug(
                 "Reusing connected player for guild %s: channel=%s target=%s current=%s queue=%s playing=%s paused=%s",
                 guild.id,
                 getattr(getattr(player, "channel", None), "id", None),
@@ -206,7 +191,7 @@ async def reconnect_player_voice(player: wavelink.Player) -> wavelink.Player:
         state.voice_refresh_in_progress = True
         try:
             await save_player_state(player)
-            logger.warning(
+            logger.info(
                 "Refreshing voice session for guild %s: channel=%s current=%s queue=%s position=%s volume=%s",
                 guild.id,
                 getattr(target_channel, "id", None),
@@ -249,7 +234,7 @@ async def reconnect_player_voice(player: wavelink.Player) -> wavelink.Player:
 async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
     loop = asyncio.get_running_loop()
     started = loop.time()
-    deadline = loop.time() + lavalink_voice_ready_timeout()
+    deadline = loop.time() + LAVALINK_VOICE_READY_TIMEOUT
 
     while True:
         try:
@@ -259,7 +244,7 @@ async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
             payload = None
 
         if payload and payload.state.connected:
-            logger.info(
+            logger.debug(
                 "Lavalink voice ready for guild %s after %.2fs: ping=%s",
                 player.guild.id,
                 loop.time() - started,
@@ -279,32 +264,29 @@ async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
             )
             raise RuntimeError(f"Lavalink did not finish connecting to voice ({state}).")
 
-        await asyncio.sleep(lavalink_voice_ready_interval())
+        await asyncio.sleep(LAVALINK_VOICE_READY_INTERVAL)
 
 
 async def add_tracks(
     player: wavelink.Player,
     tracks: list[wavelink.Playable],
-    *,
-    start_playback: bool = True,
 ) -> None:
     if not tracks:
         return
 
     was_idle = not player.current and player.queue.is_empty
-    logger.info(
-        "Adding %s track(s) to guild %s queue: start_playback=%s was_idle=%s current=%s queue_before=%s",
+    logger.debug(
+        "Adding %s track(s) to guild %s queue: was_idle=%s current=%s queue_before=%s",
         len(tracks),
         player.guild.id,
-        start_playback,
         was_idle,
         track_log_label(player.current),
         len(list(player.queue)),
     )
     player.queue.put(tracks)
-    if start_playback and not player.current:
+    if not player.current:
         await play_next(player)
-    logger.info(
+    logger.debug(
         "Added tracks to guild %s: current=%s queue_after=%s playing=%s paused=%s",
         player.guild.id,
         track_log_label(player.current),
@@ -314,12 +296,22 @@ async def add_tracks(
     )
 
 
+def has_next_track(player: wavelink.Player) -> bool:
+    # Wavelink's Queue.get() replays or wraps in loop modes even when no tracks are queued.
+    queue = player.queue
+    if queue.mode is wavelink.QueueMode.loop and queue.loaded:
+        return True
+    if queue.mode is wavelink.QueueMode.loop_all and queue.history:
+        return True
+    return not queue.is_empty
+
+
 async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
-    if player.queue.is_empty:
-        logger.info("play_next skipped for guild %s: queue is empty", player.guild.id)
+    if not has_next_track(player):
+        logger.debug("play_next skipped for guild %s: queue is empty", player.guild.id)
         return None
 
-    logger.info(
+    logger.debug(
         "Starting next track for guild %s: current=%s queue_before=%s connected=%s",
         player.guild.id,
         track_log_label(player.current),
@@ -329,7 +321,7 @@ async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
     await wait_for_lavalink_voice(player)
     track = player.queue.get()
     volume = player.volume if player.volume is not None else default_volume()
-    logger.info(
+    logger.debug(
         "Calling Lavalink play for guild %s: volume=%s track=%s",
         player.guild.id,
         volume,
@@ -340,7 +332,7 @@ async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
     await player.play(track, volume=volume, start=start, paused=False)
     get_guild_state(player.guild.id).paused_at = None
     track.extras = extras
-    logger.info(
+    logger.debug(
         "Lavalink play call completed for guild %s: current=%s queue_after=%s playing=%s paused=%s",
         player.guild.id,
         track_log_label(player.current),
@@ -388,9 +380,5 @@ async def clear_player(player: wavelink.Player) -> None:
 
 
 async def disconnect_player(player: wavelink.Player) -> None:
-    state = get_guild_state(player.guild.id)
-    if state.idle_task:
-        state.idle_task.cancel()
-        state.idle_task = None
     await clear_player(player)
     await player.disconnect()

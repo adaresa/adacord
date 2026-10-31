@@ -11,7 +11,7 @@ from adacord.persistence import (
     save_player_state,
     save_preserved_player_state,
 )
-from adacord.player import get_player, play_next
+from adacord.player import get_player, has_next_track, play_next
 from adacord.recovery import restore_guild_playback_state
 from adacord.sources import search_lavalink, search_youtube_alternative
 from adacord.state import get_guild_state
@@ -52,7 +52,7 @@ async def reconnect_saved_voice_playback(bot: commands.Bot, guild_id: int, saved
         if delay:
             await asyncio.sleep(delay)
         try:
-            logger.warning(
+            logger.info(
                 "Voice playback reconnect attempt %s/%s starting for guild %s: saved_current=%s saved_queue=%s",
                 attempt,
                 len(VOICE_RECONNECT_ATTEMPT_DELAYS),
@@ -88,7 +88,7 @@ async def handle_bot_voice_disconnect(
         logger.info("Ignoring intentional voice disconnect during session refresh for guild %s", guild_id)
         return
 
-    logger.warning(
+    logger.info(
         "Bot voice disconnect observed for guild %s: had_player=%s current=%s queue=%s",
         guild_id,
         bool(player),
@@ -154,7 +154,7 @@ async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
     if reason in NON_ADVANCING_TRACK_END_REASONS:
         logger.info("Ignoring non-advancing track end for guild %s: %s", player.guild.id, reason)
         return
-    if not player.queue.is_empty:
+    if has_next_track(player):
         await play_next(player)
     await update_display_for_guild(player.guild.id, player)
     await save_player_state(player)

@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 RECOMMENDATION_CACHE_TTL = 10 * 60
 RECOMMENDATION_COUNT = 10
 RECOMMENDATION_REQUESTER = "Adacord suggestions"
-RECOMMENDATION_POOL_LIMIT = 25
 MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD = 20
 RECOMMENDATION_VARIANT_TERMS = AVOID_TERMS | {
     "acapella",
@@ -327,7 +326,7 @@ def prune_recommendation_cache(now: float | None = None, guild_id: int | None = 
 
 async def load_recommendation_candidates(player: wavelink.Player) -> list[wavelink.Playable]:
     started = time.perf_counter()
-    logger.info(
+    logger.debug(
         "Loading recommendations for guild %s: current=%s queue=%s",
         player.guild.id,
         track_log_label(player.current),
@@ -339,7 +338,7 @@ async def load_recommendation_candidates(player: wavelink.Player) -> list[waveli
             candidates.extend(await search_lavalink(query, RECOMMENDATION_REQUESTER, limit=SONG_SEARCH_LIMIT))
         except Exception as exc:
             logger.debug("Recommendation query %r failed: %s", query, exc)
-    logger.info(
+    logger.debug(
         "Loaded %s recommendation candidate(s) for guild %s in %.2fs",
         len(candidates),
         player.guild.id,

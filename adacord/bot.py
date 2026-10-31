@@ -56,7 +56,7 @@ class AdacordBot(commands.Bot):
         controls = PlayerPanelView(register_persistent_controls=True)
         self.add_view(controls)
         custom_ids = [item.custom_id for item in controls.walk_children() if getattr(item, "custom_id", None)]
-        logger.info(
+        logger.debug(
             "Registered persistent player controls: %s",
             ", ".join(str(custom_id) for custom_id in custom_ids),
         )
@@ -69,7 +69,7 @@ class AdacordBot(commands.Bot):
             self.tree.copy_global_to(guild=guild)
             synced = await self.sync_commands_safely(
                 guild=guild,
-                description=f"guild {guild_id}. Confirm the configured dev bot is installed in that server",
+                description=f"guild {guild_id}. Confirm the bot was invited to that server with the applications.commands scope",
             )
             if not synced:
                 return
@@ -98,7 +98,7 @@ def register_events(bot: AdacordBot) -> None:
     @bot.event
     async def on_ready() -> None:
         assert bot.user is not None
-        activity = discord.CustomActivity(name="kassu's music bot")
+        activity = discord.CustomActivity(name="/play to start the music")
         await bot.change_presence(activity=activity, status=discord.Status.online)
         logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
         if not bot.playback_restored:
@@ -181,4 +181,5 @@ def run() -> None:
     if not token:
         logger.error("DISCORD_TOKEN is not set.")
         raise SystemExit(1)
-    bot.run(token)
+    # Logging is configured above; discord.py's default handler would print its lines twice.
+    bot.run(token, log_handler=None)

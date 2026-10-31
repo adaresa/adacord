@@ -157,19 +157,6 @@ def player_state_snapshot(
     }
 
 
-def save_player_state_now(player: wavelink.Player | None) -> None:
-    snapshot = player_state_snapshot(player)
-    if not snapshot:
-        return
-
-    guild_id, saved = snapshot
-    if saved is None:
-        clear_guild_state_now(guild_id)
-        return
-
-    save_guild_snapshot(guild_id, saved)
-
-
 async def save_player_state(player: wavelink.Player | None) -> None:
     snapshot = player_state_snapshot(player)
     if not snapshot:

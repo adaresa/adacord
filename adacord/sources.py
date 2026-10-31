@@ -79,7 +79,7 @@ def song_variants(text: str) -> set[str]:
 
 
 def song_search_query(query: str) -> str:
-    """Do not send negated versions as positive search terms to the provider."""
+    """Remove negated version requests such as "not slowed" from a provider query."""
     terms = sorted(AVOID_TERMS | VARIANT_ALIASES.keys(), key=len, reverse=True)
     versions = "|".join(r"[\s-]+".join(re.escape(word) for word in term.split()) for term in terms)
     query = re.sub(rf"\b(?:no|not|without)\s+(?:{versions})\b", " ", query, flags=re.IGNORECASE)
@@ -115,9 +115,6 @@ def score_song_candidate(
         core_words = set(song_search_text(core_title).split()) - SEARCH_DECORATIONS
         if not explicit_artist and core_words and core_words <= query_words:
             score = 100
-
-    # Provider order carries relevance/popularity information we do not have.
-    # Generic upload labels (or words in an artist name) must not override it.
 
     length = getattr(track, "length", None)
     if length and not requested & {"extended", "hour", "hours", "loop", "looped"}:

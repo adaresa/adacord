@@ -8,7 +8,6 @@ from adacord.config import DEFAULT_VOLUME
 
 @dataclass
 class GuildState:
-    text_channel: discord.abc.Messageable | None = None
     display_message: discord.Message | None = None
     display_channel: discord.abc.Messageable | None = None
     voice_channel_id: int | None = None
@@ -18,7 +17,6 @@ class GuildState:
     previous_volume: int = DEFAULT_VOLUME
     connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     display_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    idle_task: asyncio.Task[None] | None = None
     display_refresh_task: asyncio.Task[None] | None = None
     display_rate_limit_until: float = 0.0
     display_last_edit_at: float = 0.0

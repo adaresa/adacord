@@ -33,9 +33,10 @@ async def test_reconnect_saved_voice_playback_restores_connected_player(monkeypa
 
     saved = {"voice_channel_id": 456, "current": saved_track(FakeTrack("Current")), "queue": []}
 
-    await events.reconnect_saved_voice_playback(FakeBot(guild), guild.id, saved)
+    bot = FakeBot(guild)
+    await events.reconnect_saved_voice_playback(bot, guild.id, saved)
 
-    assert calls == [(calls[0][0], guild.id, saved)]
+    assert calls == [(bot, guild.id, saved)]
 
 
 async def test_reconnect_saved_voice_playback_retries_and_preserves_state(monkeypatch) -> None:

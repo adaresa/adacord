@@ -2,7 +2,6 @@ import logging
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Mapping
 
@@ -141,9 +140,9 @@ async def respond_and_clear_deferred(
         logger.exception("Failed to delete deferred interaction response")
 
 
-async def connect_for_player_panel(interaction: discord.Interaction) -> wavelink.Player | None:
+async def connect_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
     if not interaction.guild:
-        await respond(interaction, "This action can only be used in a server.", ephemeral=True)
+        await respond(interaction, "This can only be used in a server.", ephemeral=True)
         return None
 
     channel = user_voice_channel(interaction)
@@ -164,12 +163,10 @@ async def connect_for_player_panel(interaction: discord.Interaction) -> wavelink
         await respond_and_clear_deferred(interaction, str(exc), ephemeral=True)
         return None
     except Exception as exc:
-        logger.exception("Failed to connect Lavalink player from player panel")
+        logger.exception("Failed to connect Lavalink player to voice")
         await respond_and_clear_deferred(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
         return None
 
-    state = get_guild_state(interaction.guild.id)
-    state.text_channel = interaction.channel
     return player
 
 
@@ -273,49 +270,6 @@ def build_player_panel_model(
             "add": not connected,
         }),
     )
-
-
-def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord.Embed:
-    state = get_guild_state(guild_id)
-    current = player.current if player else None
-    paused = bool(player and player.paused)
-    color = discord.Color.dark_grey()
-    if current:
-        color = discord.Color.yellow() if paused else discord.Color.green()
-
-    embed = discord.Embed(title="Music Player", color=color, timestamp=datetime.now(timezone.utc))
-
-    if current:
-        duration = format_duration(current.length)
-        title = f"**{track_display_title(current)}**"
-        if duration:
-            title += f" `[{duration}]`"
-        embed.add_field(name="Now Playing", value=title, inline=False)
-        requester = track_requester(current)
-        if requester:
-            embed.add_field(name="Requested by", value=requester, inline=True)
-    else:
-        embed.add_field(name="Now Playing", value="Nothing playing", inline=False)
-
-    volume = player.volume if player else default_volume()
-    embed.add_field(name="Volume", value=f"{volume}%", inline=True)
-    if state.loop_mode != "none":
-        embed.add_field(name="Loop", value=state.loop_mode.title(), inline=True)
-
-    tracks = queue_items(player) if player else []
-    if tracks:
-        preview = []
-        for index, track in enumerate(tracks[:5], start=1):
-            duration = format_duration(track.length)
-            suffix = f" `[{duration}]`" if duration else ""
-            preview.append(f"`{index}.` {track_display_title(track)}{suffix}")
-        if len(tracks) > 5:
-            preview.append(f"...and {len(tracks) - 5} more")
-        embed.add_field(name=f"Queue ({len(tracks)})", value="\n".join(preview), inline=False)
-    else:
-        embed.add_field(name="Queue", value="Empty", inline=False)
-
-    return embed
 
 
 class PlayerPanelView(discord.ui.LayoutView):
@@ -606,7 +560,7 @@ class PlayerPanelView(discord.ui.LayoutView):
 
     async def add(self, interaction: discord.Interaction) -> None:
         if not interaction.guild and not self.guild_id:
-            await respond(interaction, "This action can only be used in a server.", ephemeral=True)
+            await respond(interaction, "This can only be used in a server.", ephemeral=True)
             return
         await interaction.response.send_modal(AddSongModal(self.guild_id_for(interaction)))
 
@@ -675,7 +629,7 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
 
         player = player_for_interaction(interaction)
         if not player or not getattr(player, "connected", True):
-            player = await connect_for_player_panel(interaction)
+            player = await connect_for_interaction(interaction)
             if not player:
                 return
         elif not interaction.response.is_done():
@@ -684,11 +638,11 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
         try:
             result = await queue_track_request(player, query, str(interaction.user), play_first=play_first)
         except TrackRequestLoadError as exc:
-            logger.exception("Failed to load query %r from player panel", query)
+            logger.debug("Failed to load query %r from player panel", query, exc_info=True)
             await respond_and_clear_deferred(interaction, f"Could not load that request: {exc}", ephemeral=True)
             return
         except TrackRequestPlaybackError as exc:
-            logger.exception("Failed to start playback for query %r from player panel", query)
+            logger.debug("Failed to start playback for query %r from player panel", query, exc_info=True)
             await respond_and_clear_deferred(interaction, f"Could not start playback: {exc}", ephemeral=True)
             return
 
@@ -1015,8 +969,6 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
                 player,
                 manage_refresh=False,
             )
-    except asyncio.CancelledError:
-        raise
     except Exception:
         logger.exception("Failed to refresh player progress display")
     finally:
@@ -1099,9 +1051,6 @@ async def _create_or_update_display_locked(
         if manage_refresh:
             ensure_display_refresh(guild_id, player)
         return message
-    except discord.HTTPException:
-        logger.exception("Failed to create or update music display")
-        return None
     except Exception:
         logger.exception("Failed to create or update music display")
         return None

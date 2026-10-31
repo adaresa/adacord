@@ -56,6 +56,7 @@ class FakeQueue:
         self.items = list(items or [])
         self.history: list[FakeTrack] = []
         self.mode = None
+        self.loaded = None
         self.shuffled = False
 
     @property
