@@ -1,6 +1,8 @@
 # Automated VPS Deployment
 
-This guide describes one way to deploy Adacord to a VPS with GitHub Actions. It is optional; self-hosted users can run the stack manually with the README quick start.
+This guide describes one way to deploy Adacord to a VPS with GitHub Actions. It is optional; self-hosted users can run the stack manually with the [README quick start](../README.md#quick-start).
+
+It assumes you deploy from your own fork. On every push to `main`, CI publishes the bot image to `ghcr.io/<your-user>/adacord`, then the Deploy workflow updates the server over SSH. If your fork changes the bot code, point the `bot` service's `image:` in `docker-compose.yml` at your own image so the server runs your build. Without the secrets below, the Deploy workflow skips itself.
 
 ## Server Setup
 
@@ -14,15 +16,7 @@ cd /opt/adacord
 git checkout main
 ```
 
-Create `/opt/adacord/.env`:
-
-```bash
-DISCORD_TOKEN=your-discord-bot-token
-DISCORD_GUILD_ID=your-server-id
-DEFAULT_VOLUME=50
-PLAYER_IDLE_TIMEOUT=30
-VOICE_CONNECT_TIMEOUT=30
-```
+Create `/opt/adacord/.env` from `.env.example` and set at least `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. The [README](../README.md#configuration) lists every setting.
 
 Start the stack:
 
@@ -31,13 +25,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Optional: enable the playback watchdog profile on small private servers where automatic recovery is worth mounting the Docker socket. Add this to `/opt/adacord/.env`:
-
-```bash
-COMPOSE_PROFILES=watchdog
-```
-
-The watchdog checks YouTube search once a minute and opens a small media sample from up to three results. If that real playback-path probe fails three times in a row, it restarts `yt-cipher`, Lavalink, and the bot. Probe failure logs include the returned Lavalink `loadType` or a compact stream error for diagnosis.
+Optionally add `COMPOSE_PROFILES=watchdog` to `.env` to enable the [playback watchdog](../README.md#optional-playback-watchdog). Probe failure logs include the returned Lavalink `loadType` or a compact stream error for diagnosis.
 
 ## GitHub Actions Secrets
 
@@ -125,25 +113,7 @@ docker compose ps yt-cipher
 docker compose logs --tail=80 yt-cipher
 ```
 
-## Local Validation
-
-Run static checks without starting a Discord session:
-
-```bash
-python -m py_compile bot.py adacord/*.py tests/*.py
-python -m pytest
-docker compose config --no-interpolate
-COMPOSE_PROFILES=watchdog docker compose config --no-interpolate
-docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --no-interpolate
-```
-
-For local Docker testing with source builds:
-
-```bash
-cp docker-compose.override.example.yml docker-compose.override.yml
-docker compose up -d --build
-docker compose logs -f bot lavalink yt-cipher
-```
+## Checking the Server
 
 After deployment, confirm the server state with:
 

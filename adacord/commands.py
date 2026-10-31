@@ -1,72 +1,25 @@
-import asyncio
 import logging
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-import wavelink
 
 from adacord.persistence import save_player_state
-from adacord.player import (
-    MissingVoicePermissions,
-    disconnect_player,
-    ensure_player,
-    queue_items,
-    validate_voice_channel_permissions,
-)
-from adacord.state import get_guild_state
+from adacord.player import disconnect_player, queue_items
 from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, queue_track_request
 from adacord.utils import compact_log_value, track_log_label
 from adacord.ui import (
     acknowledge,
+    connect_for_interaction,
     create_or_update_display,
     player_for_interaction,
-    refresh_display_with_recommendations,
+    refresh_display_in_background,
     respond,
     respond_and_clear_deferred,
     update_display_for_guild,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
-    if not isinstance(interaction.user, discord.Member):
-        return None
-    voice = interaction.user.voice
-    return voice.channel if voice else None
-
-
-async def connect_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
-    if not interaction.guild:
-        await respond(interaction, "This command can only be used in a server.", ephemeral=True)
-        return None
-
-    channel = user_voice_channel(interaction)
-    if not channel:
-        await respond(interaction, "Join a voice channel first.", ephemeral=True)
-        return None
-
-    try:
-        validate_voice_channel_permissions(interaction.guild, channel)
-    except MissingVoicePermissions as exc:
-        await respond(interaction, str(exc), ephemeral=True)
-        return None
-
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        player = await ensure_player(interaction.guild, channel)
-    except MissingVoicePermissions as exc:
-        await respond_and_clear_deferred(interaction, str(exc), ephemeral=True)
-        return None
-    except Exception as exc:
-        logger.exception("Failed to connect Lavalink player to voice")
-        await respond_and_clear_deferred(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
-        return None
-
-    state = get_guild_state(interaction.guild.id)
-    state.text_channel = interaction.channel
-    return player
 
 
 async def join_impl(interaction: discord.Interaction) -> None:
@@ -93,7 +46,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
     if not player or not interaction.guild:
         return
 
-    logger.info(
+    logger.debug(
         "Connected player for /play: guild=%s channel=%s current=%s queue=%s playing=%s paused=%s connected=%s",
         interaction.guild.id,
         getattr(getattr(player, "channel", None), "id", None),
@@ -106,11 +59,11 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
     try:
         result = await queue_track_request(player, query, str(interaction.user))
     except TrackRequestLoadError as exc:
-        logger.exception("Failed to load query %r", query)
+        logger.debug("Failed to load query %r", query, exc_info=True)
         await respond_and_clear_deferred(interaction, f"Could not load that request: {exc}", ephemeral=True)
         return
     except TrackRequestPlaybackError as exc:
-        logger.exception("Failed to start playback for query %r", query)
+        logger.debug("Failed to start playback for query %r", query, exc_info=True)
         await respond_and_clear_deferred(interaction, f"Could not start playback: {exc}", ephemeral=True)
         return
 
@@ -118,7 +71,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await respond_and_clear_deferred(interaction, "No playable tracks were found.", ephemeral=True)
         return
 
-    logger.info(
+    logger.debug(
         "Finished /play request: guild=%s added=%s was_idle=%s current=%s queue=%s playing=%s paused=%s",
         interaction.guild.id,
         len(result.tracks),
@@ -134,7 +87,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await update_display_for_guild(interaction.guild.id, player, manage_refresh=False)
 
     await acknowledge(interaction)
-    asyncio.create_task(refresh_display_with_recommendations(interaction.guild.id, player))
+    refresh_display_in_background(interaction.guild.id, player)
 
 
 async def disconnect_impl(interaction: discord.Interaction) -> None:
@@ -160,7 +113,6 @@ async def remove_impl(interaction: discord.Interaction, position: int) -> None:
     if position > len(tracks):
         await respond(interaction, f"Queue only has {len(tracks)} tracks.", ephemeral=True)
         return
-    removed = tracks[position - 1]
     del player.queue[position - 1]
     await save_player_state(player)
     await acknowledge(interaction)

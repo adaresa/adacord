@@ -9,9 +9,8 @@ from adacord.persistence import (
     clear_guild_state as clear_saved_guild_state,
     load_state,
     save_player_state,
-    save_preserved_player_state,
 )
-from adacord.player import get_player, play_next
+from adacord.player import get_player, has_next_track, play_next
 from adacord.recovery import restore_guild_playback_state
 from adacord.sources import search_lavalink, search_youtube_alternative
 from adacord.state import get_guild_state
@@ -52,7 +51,7 @@ async def reconnect_saved_voice_playback(bot: commands.Bot, guild_id: int, saved
         if delay:
             await asyncio.sleep(delay)
         try:
-            logger.warning(
+            logger.info(
                 "Voice playback reconnect attempt %s/%s starting for guild %s: saved_current=%s saved_queue=%s",
                 attempt,
                 len(VOICE_RECONNECT_ATTEMPT_DELAYS),
@@ -88,7 +87,7 @@ async def handle_bot_voice_disconnect(
         logger.info("Ignoring intentional voice disconnect during session refresh for guild %s", guild_id)
         return
 
-    logger.warning(
+    logger.info(
         "Bot voice disconnect observed for guild %s: had_player=%s current=%s queue=%s",
         guild_id,
         bool(player),
@@ -154,8 +153,12 @@ async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
     if reason in NON_ADVANCING_TRACK_END_REASONS:
         logger.info("Ignoring non-advancing track end for guild %s: %s", player.guild.id, reason)
         return
-    if not player.queue.is_empty:
-        await play_next(player)
+    if has_next_track(player):
+        try:
+            await play_next(player)
+        except Exception:
+            # A voice-ready timeout or rejected play must not leave the panel and snapshot stale.
+            logger.exception("Could not start next track for guild %s", player.guild.id)
     await update_display_for_guild(player.guild.id, player)
     await save_player_state(player)
 
@@ -228,22 +231,76 @@ def alternate_recovery_query(track: object) -> str | None:
     return title or author or None
 
 
-async def preserve_failed_playback(
+def same_track(first: object | None, second: object | None) -> bool:
+    if first is None or second is None:
+        return False
+    if first is second:
+        return True
+    encoded = getattr(first, "encoded", None)
+    return bool(encoded) and encoded == getattr(second, "encoded", None)
+
+
+def forget_failed_track(queue: wavelink.Queue, failed_track: object | None) -> None:
+    # Loop modes would replay a track that cannot load, so unload it like a forced
+    # skip and keep it out of the loop-all history.
+    queue.loaded = None
+    history = queue.history
+    if failed_track is None or not history:
+        return
+    for index in range(len(history) - 1, -1, -1):
+        if same_track(history[index], failed_track):
+            del history[index]
+            return
+
+
+async def skip_failed_track(player: wavelink.Player, failed_track: wavelink.Playable | None) -> None:
+    current = player.current
+    if current is not None and not same_track(current, failed_track):
+        logger.info("Playback already moved past the failed track in guild %s", player.guild.id)
+        return
+
+    forget_failed_track(player.queue, failed_track)
+    if has_next_track(player):
+        await play_next(player, replacing=current)
+    elif current is not None:
+        await player.skip(force=True)
+
+
+async def handle_failed_track(
     player: wavelink.Player,
     failed_track: wavelink.Playable | None,
-    queued: list[wavelink.Playable],
-    position: int,
     *,
-    paused: bool,
+    event: str,
+    position: int,
+    use_alternative: bool = False,
 ) -> None:
-    await save_preserved_player_state(
-        player,
-        current=failed_track,
-        queued=queued,
-        position=position,
-        paused=paused,
-    )
+    if not getattr(player, "connected", True):
+        logger.info("Ignoring %s from disconnected player for guild %s", event, player.guild.id)
+        return
+
+    try:
+        if failed_track and await recover_failed_track(
+            player,
+            failed_track,
+            position=position,
+            volume=player.volume,
+            use_alternative=use_alternative,
+        ):
+            logger.info("Recovered %s for guild %s without consuming queue", event, player.guild.id)
+            await update_display_for_guild(player.guild.id, player)
+            await save_player_state(player)
+            return
+    except Exception:
+        logger.exception("Could not recover %s for guild %s", event, player.guild.id)
+
+    # Lavalink's follow-up TrackEnd (loadFailed) does not advance, so moving on is up to us.
+    logger.info("Skipping unrecoverable track for guild %s after %s", player.guild.id, event)
+    try:
+        await skip_failed_track(player, failed_track)
+    except Exception:
+        logger.exception("Could not skip failed track for guild %s", player.guild.id)
     await update_display_for_guild(player.guild.id, player)
+    await save_player_state(player)
 
 
 async def recover_failed_track(
@@ -308,37 +365,23 @@ async def handle_track_exception(payload: wavelink.TrackExceptionEventPayload) -
         return
 
     failed_track = getattr(payload, "track", None) or player.current
-    queued = list(player.queue)
     position = max(0, int(getattr(player, "position", 0) or 0))
-    volume = player.volume
-    paused = bool(player.paused)
     logger.warning(
         "Lavalink track exception in guild %s: track=%s queue=%s position=%s paused=%s exception=%s",
         player.guild.id,
         track_log_label(failed_track),
-        len(queued),
+        len(list(player.queue)),
         position,
-        paused,
+        bool(player.paused),
         compact_log_value(payload.exception, limit=500),
     )
-
-    try:
-        if failed_track and await recover_failed_track(
-            player,
-            failed_track,
-            position=position,
-            volume=volume,
-            use_alternative=youtube_playback_rejected(payload.exception),
-        ):
-            logger.info("Submitted track recovery for guild %s without consuming queue", player.guild.id)
-            await update_display_for_guild(player.guild.id, player)
-            await save_player_state(player)
-            return
-    except Exception:
-        logger.exception("Could not recover failed track for guild %s", player.guild.id)
-
-    logger.info("Preserving failed track and queue for guild %s after track exception", player.guild.id)
-    await preserve_failed_playback(player, failed_track, queued, position, paused=paused)
+    await handle_failed_track(
+        player,
+        failed_track,
+        event="track exception",
+        position=position,
+        use_alternative=youtube_playback_rejected(payload.exception),
+    )
 
 
 async def handle_track_stuck(payload: wavelink.TrackStuckEventPayload) -> None:
@@ -347,31 +390,17 @@ async def handle_track_stuck(payload: wavelink.TrackStuckEventPayload) -> None:
         return
 
     failed_track = getattr(payload, "track", None) or player.current
-    queued = list(player.queue)
     position = max(0, int(getattr(player, "position", 0) or 0))
-    volume = player.volume
-    paused = bool(player.paused)
     logger.warning(
         "Lavalink track stuck in guild %s after threshold %s: track=%s queue=%s position=%s paused=%s",
         player.guild.id,
         getattr(payload, "threshold", None),
         track_log_label(failed_track),
-        len(queued),
+        len(list(player.queue)),
         position,
-        paused,
+        bool(player.paused),
     )
-
-    try:
-        if failed_track and await recover_failed_track(player, failed_track, position=position, volume=volume):
-            logger.info("Recovered stuck track for guild %s without consuming queue", player.guild.id)
-            await update_display_for_guild(player.guild.id, player)
-            await save_player_state(player)
-            return
-    except Exception:
-        logger.exception("Could not recover stuck track for guild %s", player.guild.id)
-
-    logger.info("Preserving failed track and queue for guild %s after track stuck", player.guild.id)
-    await preserve_failed_playback(player, failed_track, queued, position, paused=paused)
+    await handle_failed_track(player, failed_track, event="track stuck", position=position)
 
 
 async def handle_inactive_player(player: wavelink.Player) -> None:

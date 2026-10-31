@@ -23,7 +23,20 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'
 
     steps:
+      - name: Check deploy secrets
+        id: config
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          if [ -n "$VPS_HOST" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::VPS_HOST is not set; skipping deployment."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Prepare SSH
+        if: steps.config.outputs.configured == 'true'
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
@@ -41,6 +54,7 @@ jobs:
           test -n "$VPS_PORT"
 
       - name: Deploy compose stack
+        if: steps.config.outputs.configured == 'true'
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}

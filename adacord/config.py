@@ -4,6 +4,8 @@ DEFAULT_VOLUME = 50
 LAVALINK_URI = "http://lavalink:2333"
 LAVALINK_PASSWORD = "adacord-internal-lavalink"
 PLAYBACK_STATE_FILE = "data/playback_state.json"
+LAVALINK_VOICE_READY_TIMEOUT = 10.0
+LAVALINK_VOICE_READY_INTERVAL = 0.25
 
 
 def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -42,30 +44,6 @@ def discord_guild_id() -> str | None:
 
 def default_volume() -> int:
     return env_int("DEFAULT_VOLUME", DEFAULT_VOLUME, minimum=0, maximum=200)
-
-
-def lavalink_uri() -> str:
-    return LAVALINK_URI
-
-
-def lavalink_password() -> str:
-    return LAVALINK_PASSWORD
-
-
-def lavalink_connect_retries() -> int:
-    return env_int("LAVALINK_CONNECT_RETRIES", 30, minimum=1)
-
-
-def lavalink_connect_delay() -> float:
-    return env_float("LAVALINK_CONNECT_DELAY", 2.0, minimum=0.0)
-
-
-def lavalink_voice_ready_timeout() -> float:
-    return env_float("LAVALINK_VOICE_READY_TIMEOUT", 10.0, minimum=0.0)
-
-
-def lavalink_voice_ready_interval() -> float:
-    return env_float("LAVALINK_VOICE_READY_INTERVAL", 0.25, minimum=0.01)
 
 
 def player_idle_timeout() -> int:

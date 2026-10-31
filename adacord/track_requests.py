@@ -40,7 +40,7 @@ async def queue_track_request(
 ) -> TrackRequestResult:
     started = time.perf_counter()
     guild_id = player.guild.id
-    logger.info(
+    logger.debug(
         "Loading track request for guild %s: query=%r requester=%s current=%s queue=%s playing=%s paused=%s",
         guild_id,
         compact_log_value(query, limit=160),
@@ -81,7 +81,7 @@ async def queue_track_request(
 
     was_idle = not player.current and player.queue.is_empty
     try:
-        logger.info(
+        logger.debug(
             "Queueing %s track(s) for guild %s: source=%s title=%r was_idle=%s play_first=%s first=%s",
             len(tracks),
             guild_id,

@@ -6,12 +6,26 @@ from types import SimpleNamespace
 import discord
 import pytest
 
-from adacord import events, ui
+from adacord import ui
 from adacord.recommendations import Recommendation
 from adacord.sources import LoadSummary
 from adacord.state import get_guild_state, guild_states
-from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, TrackRequestResult
-from conftest import FakeInteraction, FakeMember, FakeMessage, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack, FakeVoiceChannel
+from adacord.track_requests import TrackRequestResult
+from conftest import (
+    REQUEST_FAILURES,
+    FakeGuild,
+    FakeInteraction,
+    FakeMember,
+    FakeMessage,
+    FakePlayer,
+    FakeQueue,
+    FakeTask,
+    FakeTextChannel,
+    FakeTrack,
+    FakeVoiceChannel,
+    assert_no_text_response,
+    last_response_text,
+)
 
 
 def embed_field(embed, name: str):
@@ -26,26 +40,19 @@ def text_components(view: discord.ui.LayoutView) -> list[str]:
     return [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
 
 
-def assert_no_text_response(interaction: FakeInteraction) -> None:
-    assert interaction.response.sent == []
-    assert interaction.followup.sent == []
+def panel_view(player: FakePlayer) -> ui.PlayerPanelView:
+    return ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
 
 
-def last_response_text(interaction: FakeInteraction) -> str:
-    if interaction.response.sent:
-        return interaction.response.sent[-1]["args"][0]
-    return interaction.followup.sent[-1]["args"][0]
+def panel_message(player: FakePlayer, message_cls: type[FakeMessage] = FakeMessage, **kwargs) -> FakeMessage:
+    return message_cls(view=panel_view(player), **kwargs)
 
 
-class FakeTask:
-    def __init__(self):
-        self.cancelled = False
-
-    def done(self) -> bool:
-        return False
-
-    def cancel(self) -> None:
-        self.cancelled = True
+def attach_display(state, message: FakeMessage, channel: FakeTextChannel) -> None:
+    state.display_message = message
+    state.display_message_id = message.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
 
 
 class MissingOnEditMessage(FakeMessage):
@@ -90,8 +97,7 @@ def test_build_player_panel_model_for_idle_state() -> None:
 
 
 def test_player_panel_view_renders_idle_leave_hint() -> None:
-    view = ui.PlayerPanelView(123, ui.build_player_panel_model(FakePlayer(), 123))
-    texts = "\n".join(text_components(view))
+    texts = "\n".join(text_components(panel_view(FakePlayer())))
 
     assert "### Nothing playing" in texts
     assert "Use `/dc` to leave." in texts
@@ -164,7 +170,7 @@ def test_player_panel_view_renders_text_and_thumbnail() -> None:
     current.artwork = "https://example.test/current.jpg"
     player = FakePlayer(current=current, queue=FakeQueue([FakeTrack("Next")]))
 
-    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    view = panel_view(player)
     texts = "\n".join(text_components(view))
 
     assert "### Current" in texts
@@ -176,8 +182,7 @@ def test_player_panel_view_renders_text_and_thumbnail() -> None:
 
 
 def test_player_panel_view_renders_enabled_add_button_when_connected() -> None:
-    player = FakePlayer()
-    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    view = panel_view(FakePlayer())
     add_button = next(item for item in view.walk_children() if getattr(item, "custom_id", None) == "adacord:player:add")
 
     assert add_button.label == "Add song"
@@ -242,7 +247,7 @@ async def test_create_or_update_display_replaces_legacy_embed_message() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    legacy_message = FakeMessage(embed=ui.build_player_embed(player, player.guild.id))
+    legacy_message = FakeMessage(embed=discord.Embed(title="Music Player"))
     state.display_message = legacy_message
     state.display_channel = channel
 
@@ -259,9 +264,7 @@ async def test_create_or_update_display_restores_channel_on_existing_v2_edit() -
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    state.display_message = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
+    state.display_message = panel_message(player)
     state.display_channel = None
     state.display_channel_id = None
 
@@ -276,14 +279,9 @@ async def test_create_or_update_display_recreates_missing_v2_message() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    stale_message = MissingOnEditMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
+    stale_message = panel_message(player, MissingOnEditMessage)
     stale_message.id = 111
-    state.display_message = stale_message
-    state.display_message_id = stale_message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
+    attach_display(state, stale_message, channel)
 
     message = await ui.create_or_update_display(player.guild.id, channel, player)
 
@@ -298,15 +296,11 @@ async def test_create_or_update_display_recovers_saved_display_by_id() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    message = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
+    message = panel_message(player)
     message.id = 456
     channel.messages_by_id[message.id] = message
+    attach_display(state, message, channel)
     state.display_message = None
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
 
     recovered = await ui.create_or_update_display(player.guild.id, channel, player)
 
@@ -322,16 +316,11 @@ async def test_create_or_update_display_ignores_non_bot_saved_display_message() 
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    message = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)),
-        author=SimpleNamespace(bot=False),
-    )
+    message = panel_message(player, author=SimpleNamespace(bot=False))
     message.id = 456
     channel.messages_by_id[message.id] = message
+    attach_display(state, message, channel)
     state.display_message = None
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
 
     created = await ui.create_or_update_display(player.guild.id, channel, player)
 
@@ -341,18 +330,37 @@ async def test_create_or_update_display_ignores_non_bot_saved_display_message() 
     assert state.display_message_id == created.id
 
 
+async def test_create_or_update_display_leaves_other_bots_panels_alone() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    own_panel = panel_message(player)
+    own_panel.id = 300
+    other_bot_panel = panel_message(player, author=SimpleNamespace(bot=True, id=4242))
+    other_bot_panel.id = 200
+    channel.history_messages = [own_panel, other_bot_panel]
+    channel.messages_by_id[other_bot_panel.id] = other_bot_panel
+    attach_display(state, other_bot_panel, channel)
+    state.display_message = None
+
+    recovered = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert recovered is own_panel
+    assert channel.sent == []
+    assert other_bot_panel.edits == []
+    assert other_bot_panel.deleted is False
+    assert own_panel.edits[-1]["view"].has_components_v2()
+
+
 async def test_create_or_update_display_scans_history_and_cleans_duplicate_panels() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    newest = FakeMessage(view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)))
+    newest = panel_message(player)
     newest.id = 300
-    older = FakeMessage(view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)))
+    older = panel_message(player)
     older.id = 200
-    user_panel = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)),
-        author=SimpleNamespace(bot=False),
-    )
+    user_panel = panel_message(player, author=SimpleNamespace(bot=False))
     user_panel.id = 100
     channel.history_messages = [newest, user_panel, older]
     state.display_channel = channel
@@ -374,13 +382,8 @@ async def test_create_or_update_display_retries_transient_edit_without_replacing
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    message = TransientOnEditMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
-    state.display_message = message
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
+    message = panel_message(player, TransientOnEditMessage)
+    attach_display(state, message, channel)
     monkeypatch.setattr(ui, "DISPLAY_EDIT_RETRY_DELAY", 0)
 
     result = await ui.create_or_update_display(player.guild.id, channel, player)
@@ -396,13 +399,7 @@ async def test_rate_limited_display_edit_records_retry_after(monkeypatch) -> Non
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
     state = get_guild_state(player.guild.id)
-    message = RateLimitedOnEditMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
-    state.display_message = message
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
+    attach_display(state, panel_message(player, RateLimitedOnEditMessage), channel)
     monkeypatch.setattr(ui, "DISPLAY_EDIT_RETRY_DELAY", 0)
 
     result = await ui.create_or_update_display(player.guild.id, channel, player)
@@ -427,25 +424,20 @@ async def test_concurrent_display_updates_send_only_one_panel() -> None:
     assert len(channel.sent[0].edits) == 1
 
 
-def test_display_refresh_starts_reuses_and_stops(monkeypatch) -> None:
+def test_display_refresh_starts_reuses_and_stops(captured_tasks) -> None:
     player = FakePlayer(current=FakeTrack("Current"), playing=True)
     state = get_guild_state(player.guild.id)
     state.display_channel = FakeTextChannel()
-    task = FakeTask()
-
-    def fake_create_task(coro):
-        coro.close()
-        return task
-
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
 
     ui.ensure_display_refresh(player.guild.id, player)
+    [task] = captured_tasks
     assert state.display_refresh_task is task
 
     player.paused = True
     ui.ensure_display_refresh(player.guild.id, player)
     assert task.cancelled is False
     assert state.display_refresh_task is task
+    assert captured_tasks == [task]
 
     player.connected = False
     ui.ensure_display_refresh(player.guild.id, player)
@@ -453,21 +445,14 @@ def test_display_refresh_starts_reuses_and_stops(monkeypatch) -> None:
     assert state.display_refresh_task is None
 
 
-def test_idle_display_refresh_starts_for_connected_idle_player(monkeypatch) -> None:
+def test_idle_display_refresh_starts_for_connected_idle_player(captured_tasks) -> None:
     player = FakePlayer()
     state = get_guild_state(player.guild.id)
     state.display_channel = FakeTextChannel()
-    task = FakeTask()
-
-    def fake_create_task(coro):
-        coro.close()
-        return task
-
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
 
     ui.ensure_display_refresh(player.guild.id, player)
 
-    assert state.display_refresh_task is task
+    assert captured_tasks == [state.display_refresh_task]
 
 
 async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch) -> None:
@@ -505,21 +490,12 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
     assert saves == [player]
 
 
-def test_active_display_refresh_interval_is_five_seconds() -> None:
-    assert ui.DISPLAY_REFRESH_INTERVAL == 5.0
-
-
 async def test_successful_display_edit_delays_automatic_refresh_budget() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
-    message = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
+    message = panel_message(player)
     state = get_guild_state(player.guild.id)
-    state.display_message = message
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
+    attach_display(state, message, channel)
 
     result = await ui.create_or_update_display(player.guild.id, channel, player)
 
@@ -532,9 +508,7 @@ async def test_progress_refresh_does_not_refresh_recommendations(monkeypatch) ->
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"), playing=True)
     state = get_guild_state(player.guild.id)
-    state.display_message = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
+    state.display_message = panel_message(player)
     state.display_channel = channel
     calls = []
 
@@ -549,6 +523,38 @@ async def test_progress_refresh_does_not_refresh_recommendations(monkeypatch) ->
     assert calls == [(player, False)]
 
 
+async def test_suggestion_loading_does_not_hold_the_display_lock(monkeypatch) -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    get_guild_state(player.guild.id).display_channel = channel
+    loading = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def slow_recommendations(seen_player, *, allow_refresh=True):
+        calls.append(allow_refresh)
+        if allow_refresh:
+            loading.set()
+            await release.wait()
+        return ()
+
+    monkeypatch.setattr(ui, "recommendations_for_player", slow_recommendations)
+    monkeypatch.setattr(ui, "ensure_display_refresh", lambda guild_id, seen_player: None)
+
+    refreshing = asyncio.create_task(ui.update_display_for_guild(player.guild.id, player))
+    await loading.wait()
+    await asyncio.wait_for(ui.update_display_for_guild(player.guild.id, player, manage_refresh=False), timeout=1)
+
+    assert len(channel.sent) == 1
+    assert not refreshing.done()
+
+    release.set()
+    await refreshing
+
+    assert calls == [True, False, False]
+    assert len(channel.sent) == 1
+
+
 async def test_player_panel_controls_update_player_silently(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"), playing=True, queue=FakeQueue([FakeTrack("Next")]), volume=50)
     updates = []
@@ -559,7 +565,7 @@ async def test_player_panel_controls_update_player_silently(monkeypatch) -> None
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
 
-    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
+    view = panel_view(player)
 
     pause_interaction = FakeInteraction(guild=player.guild)
     await view.pause_resume(pause_interaction)
@@ -610,9 +616,8 @@ async def test_pause_records_pause_time(monkeypatch) -> None:
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
 
     interaction = FakeInteraction(guild=player.guild)
-    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
 
-    await view.pause_resume(interaction)
+    await panel_view(player).pause_resume(interaction)
 
     state = get_guild_state(player.guild.id)
     assert player.pause_calls == [True]
@@ -643,9 +648,8 @@ async def test_resume_after_long_pause_refreshes_voice_before_playing(monkeypatc
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
 
     interaction = FakeInteraction(guild=old_player.guild)
-    view = ui.PlayerPanelView(old_player.guild.id, ui.build_player_panel_model(old_player, old_player.guild.id))
 
-    await view.pause_resume(interaction)
+    await panel_view(old_player).pause_resume(interaction)
 
     assert reconnects == [old_player]
     assert old_player.pause_calls == []
@@ -654,31 +658,43 @@ async def test_resume_after_long_pause_refreshes_voice_before_playing(monkeypatc
     assert updates == [(old_player.guild.id, new_player)]
 
 
-async def test_player_panel_add_button_opens_modal(monkeypatch) -> None:
-    player = FakePlayer()
+@pytest.mark.parametrize("connected", [True, False], ids=["connected", "without_player"])
+async def test_player_panel_add_button_opens_modal(monkeypatch, connected) -> None:
+    player = FakePlayer() if connected else None
+    guild = player.guild if connected else FakeGuild()
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
 
-    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    interaction = FakeInteraction(guild=player.guild)
-
-    await view.add(interaction)
-
-    assert isinstance(interaction.response.modal, ui.AddSongModal)
-    assert interaction.response.modal.guild_id == player.guild.id
-
-
-async def test_player_panel_add_button_opens_modal_without_connected_player(monkeypatch) -> None:
-    guild = FakePlayer().guild
-    guild.voice_client = None
-    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: None)
-
-    view = ui.PlayerPanelView(guild.id, ui.build_player_panel_model(None, guild.id))
+    view = ui.PlayerPanelView(guild.id, ui.build_player_panel_model(player, guild.id))
     interaction = FakeInteraction(guild=guild)
 
     await view.add(interaction)
 
     assert isinstance(interaction.response.modal, ui.AddSongModal)
     assert interaction.response.modal.guild_id == guild.id
+
+
+async def test_background_display_refresh_is_kept_until_it_finishes(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+    release = asyncio.Event()
+    refreshed = []
+
+    async def slow_update(guild_id, seen_player):
+        await release.wait()
+        refreshed.append((guild_id, seen_player))
+
+    monkeypatch.setattr(ui, "update_display_for_guild", slow_update)
+
+    before = set(ui.background_tasks)
+    ui.refresh_display_in_background(player.guild.id, player)
+    (task,) = ui.background_tasks - before
+
+    assert not task.done()
+
+    release.set()
+    await task
+
+    assert refreshed == [(player.guild.id, player)]
+    assert task not in ui.background_tasks
 
 
 async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatch) -> None:
@@ -701,16 +717,14 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     async def fake_create_display(guild_id, channel, seen_player, *, manage_refresh=True):
         updates.append((guild_id, seen_player, manage_refresh))
 
-    def fake_create_task(coro):
-        backgrounds.append(coro)
-        coro.close()
-        return None
+    def fake_background_refresh(guild_id, seen_player):
+        backgrounds.append((guild_id, seen_player))
 
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_display)
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(ui, "refresh_display_in_background", fake_background_refresh)
 
     modal = ui.AddSongModal(999)
     modal.query._value = "daft punk"
@@ -728,8 +742,7 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
 
 
 async def test_add_song_modal_connects_like_play_when_player_missing(monkeypatch) -> None:
-    guild = FakePlayer().guild
-    guild.voice_client = None
+    guild = FakeGuild()
     player = FakePlayer(guild=guild, playing=False)
     guild.voice_client = None
     voice_channel = FakeVoiceChannel(guild=guild, player=player)
@@ -747,14 +760,12 @@ async def test_add_song_modal_connects_like_play_when_player_missing(monkeypatch
     async def fake_create_display(guild_id, channel, seen_player, *, manage_refresh=True):
         updates.append((guild_id, channel, seen_player, manage_refresh))
 
-    def fake_create_task(coro):
-        backgrounds.append(coro)
-        coro.close()
-        return None
+    def fake_background_refresh(guild_id, seen_player):
+        backgrounds.append((guild_id, seen_player))
 
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_display)
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(ui, "refresh_display_in_background", fake_background_refresh)
 
     modal = ui.AddSongModal(guild.id)
     modal.query._value = "daft punk"
@@ -782,14 +793,10 @@ async def test_add_song_modal_accepts_yes_for_play_next(monkeypatch) -> None:
     async def fake_update(guild_id, seen_player, *, manage_refresh=True):
         return None
 
-    def fake_create_task(coro):
-        coro.close()
-        return None
-
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(ui, "refresh_display_in_background", lambda guild_id, seen_player: None)
 
     modal = ui.AddSongModal(player.guild.id)
     modal.query._value = "daft punk"
@@ -838,9 +845,8 @@ async def test_add_song_modal_reports_user_outside_voice_when_player_missing(mon
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
-async def test_add_song_modal_rejects_missing_voice_permissions_when_connecting(monkeypatch) -> None:
-    guild = FakePlayer().guild
-    guild.voice_client = None
+async def test_add_song_modal_rejects_missing_voice_permissions_when_connecting() -> None:
+    guild = FakeGuild()
     voice_channel = FakeVoiceChannel(
         guild=guild,
         permissions=SimpleNamespace(view_channel=True, connect=False, speak=True),
@@ -856,55 +862,25 @@ async def test_add_song_modal_rejects_missing_voice_permissions_when_connecting(
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
-async def test_add_song_modal_reports_empty_results(monkeypatch) -> None:
+@pytest.mark.parametrize(("outcome", "expected"), REQUEST_FAILURES)
+async def test_add_song_modal_reports_request_failure(monkeypatch, outcome, expected) -> None:
     player = FakePlayer()
 
     async def fake_queue_track_request(player, query, requester, *, play_first=False):
-        return TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
 
     modal = ui.AddSongModal(player.guild.id)
-    modal.query._value = "missing song"
+    modal.query._value = "daft punk"
     interaction = FakeInteraction(guild=player.guild)
 
     await modal.on_submit(interaction)
 
-    assert last_response_text(interaction) == "No playable tracks were found."
-    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
-    assert interaction.deleted_original_response is True
-
-
-async def test_add_song_modal_reports_load_and_playback_failures(monkeypatch) -> None:
-    player = FakePlayer()
-    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
-
-    async def fail_load(player, query, requester, *, play_first=False):
-        raise TrackRequestLoadError("source down")
-
-    modal = ui.AddSongModal(player.guild.id)
-    modal.query._value = "bad source"
-    interaction = FakeInteraction(guild=player.guild)
-    monkeypatch.setattr(ui, "queue_track_request", fail_load)
-
-    await modal.on_submit(interaction)
-
-    assert last_response_text(interaction) == "Could not load that request: source down"
-    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
-    assert interaction.deleted_original_response is True
-
-    async def fail_playback(player, query, requester, *, play_first=False):
-        raise TrackRequestPlaybackError("queue rejected")
-
-    modal = ui.AddSongModal(player.guild.id)
-    modal.query._value = "bad playback"
-    interaction = FakeInteraction(guild=player.guild)
-    monkeypatch.setattr(ui, "queue_track_request", fail_playback)
-
-    await modal.on_submit(interaction)
-
-    assert last_response_text(interaction) == "Could not start playback: queue rejected"
+    assert last_response_text(interaction) == expected
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
     assert interaction.deleted_original_response is True
 
@@ -977,10 +953,9 @@ async def test_player_panel_stop_clears_playback_but_keeps_voice_and_refreshes(m
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
 
-    view = ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
     interaction = FakeInteraction(guild=player.guild)
 
-    await view.stop(interaction)
+    await panel_view(player).stop(interaction)
 
     assert player.queue.is_empty
     assert player.skip_calls == [True]
@@ -1007,13 +982,8 @@ async def test_update_display_keeps_existing_message_when_player_is_idle() -> No
     player = FakePlayer()
     state = get_guild_state(player.guild.id)
     channel = FakeTextChannel()
-    message = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
-    state.display_message = message
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
+    message = panel_message(player)
+    attach_display(state, message, channel)
     task = FakeTask()
     state.display_refresh_task = task
 
@@ -1033,10 +1003,7 @@ async def test_update_display_deletes_existing_message_when_player_is_disconnect
     guild_id = 123
     state = get_guild_state(guild_id)
     message = FakeMessage()
-    state.display_message = message
-    state.display_message_id = message.id
-    state.display_channel = FakeTextChannel()
-    state.display_channel_id = state.display_channel.id
+    attach_display(state, message, FakeTextChannel())
     task = FakeTask()
     state.display_refresh_task = task
 
@@ -1054,13 +1021,8 @@ async def test_deleted_idle_display_is_recreated_while_player_is_connected() -> 
     player = FakePlayer()
     state = get_guild_state(player.guild.id)
     channel = FakeTextChannel()
-    message = FakeMessage(
-        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id))
-    )
-    state.display_message = message
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
+    message = panel_message(player)
+    attach_display(state, message, channel)
 
     await ui.handle_display_message_delete(player.guild.id, channel.id, message.id, player)
 
@@ -1076,10 +1038,7 @@ async def test_deleted_display_clears_state_when_player_is_disconnected() -> Non
     channel = FakeTextChannel()
     message = FakeMessage()
     task = FakeTask()
-    state.display_message = message
-    state.display_message_id = message.id
-    state.display_channel = channel
-    state.display_channel_id = channel.id
+    attach_display(state, message, channel)
     state.display_refresh_task = task
 
     await ui.handle_display_message_delete(guild_id, channel.id, message.id, None)
@@ -1105,278 +1064,6 @@ async def test_queue_view_clamps_page_when_queue_shrinks(monkeypatch) -> None:
 
     assert view.page == 0
     assert interaction.response.edits[-1]["embed"].title == "Music Queue"
-
-
-async def test_track_end_plays_next_and_updates_display(monkeypatch) -> None:
-    player = FakePlayer(queue=FakeQueue([FakeTrack("Next")]))
-    calls = []
-
-    async def fake_play_next(seen_player):
-        calls.append(("play_next", seen_player))
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    monkeypatch.setattr(events, "play_next", fake_play_next)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-
-    await events.handle_track_end(SimpleNamespace(player=player))
-
-    assert calls == [("play_next", player), ("update", player.guild.id, player)]
-
-
-async def test_track_end_only_updates_display_when_queue_empty(monkeypatch) -> None:
-    player = FakePlayer(queue=FakeQueue())
-    calls = []
-
-    async def fake_play_next(seen_player):
-        calls.append(("play_next", seen_player))
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    monkeypatch.setattr(events, "play_next", fake_play_next)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-
-    await events.handle_track_end(SimpleNamespace(player=player))
-
-    assert calls == [("update", player.guild.id, player)]
-
-
-async def test_retired_player_track_end_preserves_replacement_display_and_state(monkeypatch) -> None:
-    player = FakePlayer(queue=FakeQueue([FakeTrack("Old queued track")]))
-    player.connected = False
-    state = get_guild_state(player.guild.id)
-    replacement_message = object()
-    state.display_message = replacement_message
-    calls = []
-
-    async def unexpected(*args):
-        calls.append(args)
-
-    monkeypatch.setattr(events, "play_next", unexpected)
-    monkeypatch.setattr(events, "update_display_for_guild", unexpected)
-    monkeypatch.setattr(events, "save_player_state", unexpected)
-
-    await events.handle_track_end(SimpleNamespace(player=player, reason="stopped"))
-
-    assert calls == []
-    assert state.display_message is replacement_message
-    assert len(list(player.queue)) == 1
-
-
-async def test_track_end_ignores_non_advancing_reasons(monkeypatch) -> None:
-    queued = [FakeTrack("Next")]
-    player = FakePlayer(queue=FakeQueue(queued))
-    calls = []
-
-    async def fake_play_next(seen_player):
-        calls.append(("play_next", seen_player))
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    monkeypatch.setattr(events, "play_next", fake_play_next)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-
-    await events.handle_track_end(SimpleNamespace(player=player, reason="loadFailed"))
-    await events.handle_track_end(SimpleNamespace(player=player, reason="replaced"))
-
-    assert calls == []
-    assert list(player.queue) == queued
-
-
-async def test_track_exception_preserves_failed_track_and_queue_when_recovery_fails(monkeypatch) -> None:
-    failed = FakeTrack("Failed")
-    failed.position = 42_000
-    queued = [FakeTrack("Next")]
-    player = FakePlayer(current=failed, playing=True, queue=FakeQueue(queued), volume=70)
-    calls = []
-
-    async def fake_search(query, requester, *, limit=None):
-        calls.append(("search", query, requester, limit))
-        return []
-
-    async def fake_play_next(seen_player):
-        calls.append(("play_next", seen_player))
-
-    async def fake_save(seen_player, *, current, queued, position, paused):
-        calls.append(("save", seen_player, current, list(queued), position, paused))
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    monkeypatch.setattr(events, "search_lavalink", fake_search)
-    monkeypatch.setattr(events, "play_next", fake_play_next)
-    monkeypatch.setattr(events, "save_preserved_player_state", fake_save)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-
-    await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception="expired stream"))
-
-    assert ("play_next", player) not in calls
-    assert list(player.queue) == queued
-    assert calls == [
-        ("search", failed.uri, events.RECOVERY_REQUESTER, 1),
-        ("save", player, failed, queued, 42_000, False),
-        ("update", player.guild.id, player),
-    ]
-
-
-async def test_track_exception_replays_current_track_without_consuming_queue(monkeypatch) -> None:
-    failed = FakeTrack("Failed")
-    failed.position = 80_000
-    replacement = FakeTrack("Replacement", length=120_000)
-    queued = [FakeTrack("Next")]
-    player = FakePlayer(current=failed, playing=True, queue=FakeQueue(queued), volume=65)
-    calls = []
-
-    async def fake_search(query, requester, *, limit=None):
-        calls.append(("search", query, requester, limit))
-        return [replacement]
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    async def fake_save(seen_player):
-        calls.append(("save", seen_player))
-
-    monkeypatch.setattr(events, "search_lavalink", fake_search)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-    monkeypatch.setattr(events, "save_player_state", fake_save)
-
-    await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception="expired stream"))
-
-    assert list(player.queue) == queued
-    assert player.current is replacement
-    assert player.play_calls == [(replacement, 65)]
-    assert player.play_kwargs == [{"start": 80_000, "add_history": False}]
-    assert calls == [
-        ("search", failed.uri, events.RECOVERY_REQUESTER, 1),
-        ("update", player.guild.id, player),
-        ("save", player),
-    ]
-
-
-async def test_track_exception_uses_alternate_for_youtube_login_rejection(monkeypatch) -> None:
-    failed = FakeTrack("Failed", author="Artist")
-    failed.extras = {"query": "artist failed"}
-    replacement = FakeTrack("Replacement", author="Artist")
-    player = FakePlayer(current=failed, playing=True)
-    calls = []
-
-    async def fake_alternative(query, requester, *, exclude_uris):
-        calls.append(("alternative", query, requester, exclude_uris))
-        return replacement
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    async def fake_save(seen_player):
-        calls.append(("save", seen_player))
-
-    monkeypatch.setattr(events, "search_youtube_alternative", fake_alternative)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-    monkeypatch.setattr(events, "save_player_state", fake_save)
-
-    exception = "All clients failed to load the item. Client [WEB] failed: This video requires login."
-    await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception=exception))
-
-    assert player.current is replacement
-    assert dict(failed.extras)[events.RECOVERY_ATTEMPTED_EXTRA] is True
-    assert dict(replacement.extras)[events.RECOVERY_ATTEMPTED_EXTRA] is True
-    assert calls == [
-        ("alternative", "artist failed", events.RECOVERY_REQUESTER, {failed.uri}),
-        ("update", player.guild.id, player),
-        ("save", player),
-    ]
-
-
-async def test_track_exception_does_not_retry_a_recovery_track(monkeypatch) -> None:
-    failed = FakeTrack("Failed")
-    failed.extras = {events.RECOVERY_ATTEMPTED_EXTRA: True}
-    player = FakePlayer(current=failed, playing=True)
-    calls = []
-
-    async def fake_search(query, requester, *, limit=None):
-        calls.append(("search", query, requester, limit))
-        return [FakeTrack("Unexpected")]
-
-    async def fake_save(seen_player, *, current, queued, position, paused):
-        calls.append(("preserve", current))
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id))
-
-    monkeypatch.setattr(events, "search_lavalink", fake_search)
-    monkeypatch.setattr(events, "save_preserved_player_state", fake_save)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-
-    await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception="expired stream"))
-
-    assert calls == [("preserve", failed), ("update", player.guild.id)]
-
-
-async def test_track_stuck_preserves_failed_track_and_queue_when_recovery_errors(monkeypatch) -> None:
-    failed = FakeTrack("Failed")
-    queued = [FakeTrack("Next")]
-    player = FakePlayer(current=failed, playing=True, queue=FakeQueue(queued))
-    calls = []
-
-    async def fake_search(query, requester, *, limit=None):
-        raise RuntimeError("source still broken")
-
-    async def fake_save(seen_player, *, current, queued, position, paused):
-        calls.append(("save", seen_player, current, list(queued), position, paused))
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    monkeypatch.setattr(events, "search_lavalink", fake_search)
-    monkeypatch.setattr(events, "save_preserved_player_state", fake_save)
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-
-    await events.handle_track_stuck(SimpleNamespace(player=player, track=failed, threshold=10_000))
-
-    assert list(player.queue) == queued
-    assert player.play_calls == []
-    assert calls == [
-        ("save", player, failed, queued, 0, False),
-        ("update", player.guild.id, player),
-    ]
-
-
-async def test_track_start_updates_display(monkeypatch) -> None:
-    player = FakePlayer(current=FakeTrack("Current"))
-    calls = []
-
-    async def fake_update(guild_id, seen_player):
-        calls.append((guild_id, seen_player))
-
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-
-    await events.handle_track_start(SimpleNamespace(player=player))
-
-    assert calls == [(player.guild.id, player)]
-
-
-async def test_inactive_player_removes_display_and_clears_saved_state(monkeypatch) -> None:
-    player = FakePlayer(current=FakeTrack("Current"))
-    calls = []
-    clears = []
-
-    async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
-
-    async def fake_clear(guild_id):
-        clears.append(guild_id)
-
-    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
-    monkeypatch.setattr(events, "clear_saved_guild_state", fake_clear)
-
-    await events.handle_inactive_player(player)
-
-    assert calls == [("update", player.guild.id, None)]
-    assert clears == [player.guild.id]
 
 
 async def test_resume_starts_waiting_queue_without_current_track(monkeypatch) -> None:

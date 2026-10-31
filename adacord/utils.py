@@ -112,15 +112,6 @@ def text_contains_term(text: str, term: str) -> bool:
     return bool(re.search(rf"\b{words}\b", text))
 
 
-def avoid_terms_for_query(query: str) -> set[str]:
-    query_text = query.lower()
-    return {term for term in AVOID_TERMS if not text_contains_term(query_text, term)}
-
-
-def requested_variant_terms(query: str) -> set[str]:
-    return AVOID_TERMS - avoid_terms_for_query(query)
-
-
 def requested_display_variants(query: str) -> list[str]:
     query_text = query.lower()
     return sorted(term for term in AVOID_TERMS if text_contains_term(query_text, term))

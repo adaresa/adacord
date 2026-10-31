@@ -2,7 +2,6 @@ import logging
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Mapping
 
@@ -73,6 +72,16 @@ async def refresh_display_with_recommendations(guild_id: int, player: wavelink.P
         logger.exception("Failed to refresh player display with recommendations")
 
 
+background_tasks: set[asyncio.Task[None]] = set()
+
+
+def refresh_display_in_background(guild_id: int, player: wavelink.Player) -> None:
+    # The event loop only keeps weak references to tasks, so hold one until it finishes.
+    task = asyncio.create_task(refresh_display_with_recommendations(guild_id, player))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+
+
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
     if not interaction.guild:
         return None
@@ -141,14 +150,19 @@ async def respond_and_clear_deferred(
         logger.exception("Failed to delete deferred interaction response")
 
 
-async def connect_for_player_panel(interaction: discord.Interaction) -> wavelink.Player | None:
+async def connect_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
     if not interaction.guild:
-        await respond(interaction, "This action can only be used in a server.", ephemeral=True)
+        await respond(interaction, "This can only be used in a server.", ephemeral=True)
         return None
 
     channel = user_voice_channel(interaction)
     if not channel:
         await respond(interaction, "Join a voice channel first.", ephemeral=True)
+        return None
+
+    if isinstance(channel, discord.StageChannel):
+        # The bot would join as a suppressed listener and nobody would hear it.
+        await respond(interaction, "I can't play in Stage channels. Join a regular voice channel.", ephemeral=True)
         return None
 
     try:
@@ -164,12 +178,10 @@ async def connect_for_player_panel(interaction: discord.Interaction) -> wavelink
         await respond_and_clear_deferred(interaction, str(exc), ephemeral=True)
         return None
     except Exception as exc:
-        logger.exception("Failed to connect Lavalink player from player panel")
+        logger.exception("Failed to connect Lavalink player to voice")
         await respond_and_clear_deferred(interaction, f"Could not connect to voice: {exc}", ephemeral=True)
         return None
 
-    state = get_guild_state(interaction.guild.id)
-    state.text_channel = interaction.channel
     return player
 
 
@@ -273,49 +285,6 @@ def build_player_panel_model(
             "add": not connected,
         }),
     )
-
-
-def build_player_embed(player: wavelink.Player | None, guild_id: int) -> discord.Embed:
-    state = get_guild_state(guild_id)
-    current = player.current if player else None
-    paused = bool(player and player.paused)
-    color = discord.Color.dark_grey()
-    if current:
-        color = discord.Color.yellow() if paused else discord.Color.green()
-
-    embed = discord.Embed(title="Music Player", color=color, timestamp=datetime.now(timezone.utc))
-
-    if current:
-        duration = format_duration(current.length)
-        title = f"**{track_display_title(current)}**"
-        if duration:
-            title += f" `[{duration}]`"
-        embed.add_field(name="Now Playing", value=title, inline=False)
-        requester = track_requester(current)
-        if requester:
-            embed.add_field(name="Requested by", value=requester, inline=True)
-    else:
-        embed.add_field(name="Now Playing", value="Nothing playing", inline=False)
-
-    volume = player.volume if player else default_volume()
-    embed.add_field(name="Volume", value=f"{volume}%", inline=True)
-    if state.loop_mode != "none":
-        embed.add_field(name="Loop", value=state.loop_mode.title(), inline=True)
-
-    tracks = queue_items(player) if player else []
-    if tracks:
-        preview = []
-        for index, track in enumerate(tracks[:5], start=1):
-            duration = format_duration(track.length)
-            suffix = f" `[{duration}]`" if duration else ""
-            preview.append(f"`{index}.` {track_display_title(track)}{suffix}")
-        if len(tracks) > 5:
-            preview.append(f"...and {len(tracks) - 5} more")
-        embed.add_field(name=f"Queue ({len(tracks)})", value="\n".join(preview), inline=False)
-    else:
-        embed.add_field(name="Queue", value="Empty", inline=False)
-
-    return embed
 
 
 class PlayerPanelView(discord.ui.LayoutView):
@@ -606,7 +575,7 @@ class PlayerPanelView(discord.ui.LayoutView):
 
     async def add(self, interaction: discord.Interaction) -> None:
         if not interaction.guild and not self.guild_id:
-            await respond(interaction, "This action can only be used in a server.", ephemeral=True)
+            await respond(interaction, "This can only be used in a server.", ephemeral=True)
             return
         await interaction.response.send_modal(AddSongModal(self.guild_id_for(interaction)))
 
@@ -675,7 +644,7 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
 
         player = player_for_interaction(interaction)
         if not player or not getattr(player, "connected", True):
-            player = await connect_for_player_panel(interaction)
+            player = await connect_for_interaction(interaction)
             if not player:
                 return
         elif not interaction.response.is_done():
@@ -684,11 +653,11 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
         try:
             result = await queue_track_request(player, query, str(interaction.user), play_first=play_first)
         except TrackRequestLoadError as exc:
-            logger.exception("Failed to load query %r from player panel", query)
+            logger.debug("Failed to load query %r from player panel", query, exc_info=True)
             await respond_and_clear_deferred(interaction, f"Could not load that request: {exc}", ephemeral=True)
             return
         except TrackRequestPlaybackError as exc:
-            logger.exception("Failed to start playback for query %r from player panel", query)
+            logger.debug("Failed to start playback for query %r from player panel", query, exc_info=True)
             await respond_and_clear_deferred(interaction, f"Could not start playback: {exc}", ephemeral=True)
             return
 
@@ -701,7 +670,7 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
         else:
             await update_display_for_guild(self.guild_id, player, manage_refresh=False)
         await acknowledge(interaction)
-        asyncio.create_task(refresh_display_with_recommendations(self.guild_id, player))
+        refresh_display_in_background(self.guild_id, player)
 
 
 def play_next_requested(value: str) -> bool | None:
@@ -817,8 +786,11 @@ def is_player_panel_message(message: discord.Message) -> bool:
 
 
 def is_bot_authored_message(message: discord.Message) -> bool:
-    author = getattr(message, "author", None)
-    return bool(author and getattr(author, "bot", False))
+    # Another bot (such as a second Adacord instance) can post panels with the same
+    # control ids; only adopt or delete messages this bot wrote.
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    bot_member = getattr(getattr(message, "guild", None), "me", None)
+    return author_id is not None and author_id == getattr(bot_member, "id", None)
 
 
 async def fetch_display_message(
@@ -1015,8 +987,6 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
                 player,
                 manage_refresh=False,
             )
-    except asyncio.CancelledError:
-        raise
     except Exception:
         logger.exception("Failed to refresh player progress display")
     finally:
@@ -1029,6 +999,18 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
             state.display_refresh_task = None
 
 
+async def load_display_suggestions(
+    player: wavelink.Player | None,
+    *,
+    allow_refresh: bool,
+) -> tuple[Recommendation, ...]:
+    try:
+        return await recommendations_for_player(player, allow_refresh=allow_refresh)
+    except Exception:
+        logger.exception("Failed to load song recommendations")
+        return ()
+
+
 async def create_or_update_display(
     guild_id: int,
     channel: discord.abc.Messageable,
@@ -1037,6 +1019,8 @@ async def create_or_update_display(
     manage_refresh: bool = True,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
+    if manage_refresh:
+        await load_display_suggestions(player, allow_refresh=True)
     async with state.display_lock:
         return await _create_or_update_display_locked(guild_id, channel, player, manage_refresh=manage_refresh)
 
@@ -1049,11 +1033,9 @@ async def _create_or_update_display_locked(
     manage_refresh: bool = True,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
-    try:
-        suggestions = await recommendations_for_player(player, allow_refresh=manage_refresh)
-    except Exception:
-        logger.exception("Failed to load song recommendations")
-        suggestions = ()
+    # Suggestion searches can take seconds, so callers fill the cache before taking the
+    # display lock and the panel only reads it here.
+    suggestions = await load_display_suggestions(player, allow_refresh=False)
     view = PlayerPanelView(guild_id, build_player_panel_model(player, guild_id, suggestions))
     state.display_channel = channel
     state.display_channel_id = getattr(channel, "id", None)
@@ -1099,9 +1081,6 @@ async def _create_or_update_display_locked(
         if manage_refresh:
             ensure_display_refresh(guild_id, player)
         return message
-    except discord.HTTPException:
-        logger.exception("Failed to create or update music display")
-        return None
     except Exception:
         logger.exception("Failed to create or update music display")
         return None
@@ -1114,6 +1093,8 @@ async def update_display_for_guild(
     manage_refresh: bool = True,
 ) -> None:
     state = get_guild_state(guild_id)
+    if manage_refresh and should_maintain_display(player) and state.display_channel:
+        await load_display_suggestions(player, allow_refresh=True)
     async with state.display_lock:
         if should_maintain_display(player) and state.display_channel:
             await _create_or_update_display_locked(guild_id, state.display_channel, player, manage_refresh=manage_refresh)

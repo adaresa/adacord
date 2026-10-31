@@ -127,6 +127,10 @@ def player_state_snapshot(
 ) -> tuple[int, dict[str, Any] | None] | None:
     if not player:
         return None
+    if not getattr(player, "connected", True):
+        # A late save after an idle or /dc disconnect would make the bot rejoin on restart.
+        logger.debug("Not saving playback state for disconnected player in guild %s", player.guild.id)
+        return None
 
     current_track = player.current if current is DEFAULT_SNAPSHOT_VALUE else current
     queued_tracks = list(player.queue) if queued is DEFAULT_SNAPSHOT_VALUE else queued
@@ -155,19 +159,6 @@ def player_state_snapshot(
         "queue": saved_tracks(queued_tracks),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-
-
-def save_player_state_now(player: wavelink.Player | None) -> None:
-    snapshot = player_state_snapshot(player)
-    if not snapshot:
-        return
-
-    guild_id, saved = snapshot
-    if saved is None:
-        clear_guild_state_now(guild_id)
-        return
-
-    save_guild_snapshot(guild_id, saved)
 
 
 async def save_player_state(player: wavelink.Player | None) -> None:

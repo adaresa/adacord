@@ -13,13 +13,14 @@ from adacord.player import (
     clear_player,
     disconnect_player,
     ensure_player,
+    has_next_track,
     play_next,
     reconnect_player_voice,
     set_loop_mode,
     set_volume,
 )
 from adacord.state import get_guild_state
-from conftest import FakeGuild, FakePlayer, FakeQueue, FakeTrack, FakeVoiceChannel
+from conftest import FakeGuild, FakeNode, FakePlayer, FakeQueue, FakeTrack, FakeVoiceChannel
 
 
 async def test_add_tracks_starts_playback_when_idle() -> None:
@@ -31,17 +32,6 @@ async def test_add_tracks_starts_playback_when_idle() -> None:
     assert player.current is tracks[0]
     assert player.play_calls == [(tracks[0], 75)]
     assert list(player.queue) == [tracks[1]]
-
-
-async def test_add_tracks_can_queue_without_starting() -> None:
-    player = FakePlayer(playing=False)
-    tracks = [FakeTrack("First")]
-
-    await add_tracks(player, tracks, start_playback=False)
-
-    assert player.current is None
-    assert player.play_calls == []
-    assert list(player.queue) == tracks
 
 
 async def test_clear_paused_player_then_add_tracks_starts_playback() -> None:
@@ -95,6 +85,37 @@ async def test_play_next_uses_default_volume_when_player_volume_is_missing() -> 
 
     assert await play_next(player) is track
     assert player.play_calls == [(track, 50)]
+
+
+async def test_play_next_leaves_an_active_track_playing() -> None:
+    current = FakeTrack("Current")
+    queued = FakeTrack("Queued")
+    player = FakePlayer(current=current, queue=FakeQueue([queued]))
+
+    assert await play_next(player) is None
+    assert player.current is current
+    assert player.play_calls == []
+    assert list(player.queue) == [queued]
+
+
+async def test_concurrent_play_next_calls_start_only_one_track() -> None:
+    first = FakeTrack("First")
+    second = FakeTrack("Second")
+    player = FakePlayer(queue=FakeQueue([first, second]), playing=False)
+
+    class SlowNode(FakeNode):
+        async def fetch_player_info(self, guild_id: int):
+            await asyncio.sleep(0)
+            return await super().fetch_player_info(guild_id)
+
+    player.node = SlowNode()
+
+    results = await asyncio.gather(play_next(player), play_next(player))
+
+    assert results == [first, None]
+    assert player.current is first
+    assert player.play_calls == [(first, 50)]
+    assert list(player.queue) == [second]
 
 
 async def test_ensure_player_rejects_missing_voice_permissions_before_connect() -> None:
@@ -286,6 +307,45 @@ def test_set_loop_mode_updates_state_and_queue_mode() -> None:
     assert player.queue.mode == wavelink.QueueMode.normal
 
 
+def playable(title: str) -> wavelink.Playable:
+    info = {
+        "identifier": title,
+        "isSeekable": True,
+        "author": "Artist",
+        "length": 180_000,
+        "isStream": False,
+        "position": 0,
+        "title": title,
+        "sourceName": "youtube",
+    }
+    return wavelink.Playable({"encoded": title, "info": info, "pluginInfo": {}, "userData": {}})
+
+
+def test_has_next_track_follows_wavelink_loop_modes() -> None:
+    player = FakePlayer()
+    player.queue = wavelink.Queue()
+    first, second = playable("First"), playable("Second")
+
+    def play_from_queue() -> wavelink.Playable:
+        # wavelink.Player.play() records each played track in the queue history.
+        track = player.queue.get()
+        player.queue.history.put(track)
+        return track
+
+    player.queue.put([first, second])
+    assert play_from_queue() is first
+    assert play_from_queue() is second
+    assert not has_next_track(player)
+
+    set_loop_mode(player, "track")
+    assert has_next_track(player)
+    assert play_from_queue() is second
+
+    set_loop_mode(player, "queue")
+    assert has_next_track(player)
+    assert play_from_queue() is first
+
+
 def test_set_loop_mode_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         set_loop_mode(FakePlayer(), "forever")
@@ -304,14 +364,11 @@ async def test_clear_player_resets_queue_history_loop_and_active_playback() -> N
     assert player.skip_calls == [True]
 
 
-async def test_disconnect_player_cancels_idle_task_clears_and_disconnects() -> None:
+async def test_disconnect_player_clears_and_disconnects() -> None:
     player = FakePlayer(current=FakeTrack("Current"), playing=True, queue=FakeQueue([FakeTrack("Next")]))
-    state = get_guild_state(player.guild.id)
-    state.idle_task = asyncio.create_task(asyncio.sleep(30))
 
     await disconnect_player(player)
-    await asyncio.sleep(0)
 
-    assert state.idle_task is None
+    assert player.queue.is_empty
     assert player.disconnect_calls == 1
     assert player.guild.voice_client is None
