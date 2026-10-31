@@ -3,17 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from adacord import recovery
-from adacord.persistence import load_state
+from adacord.persistence import load_state, track_payload
 from adacord.state import get_guild_state
-from conftest import FakeGuild, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack, FakeVoiceChannel
-
-
-class FakeBot:
-    def __init__(self, guild: FakeGuild):
-        self.guild = guild
-
-    def get_guild(self, guild_id: int):
-        return self.guild if guild_id == self.guild.id else None
+from conftest import FakeBot, FakeGuild, FakePlayer, FakeQueue, FakeTextChannel, FakeTrack, FakeVoiceChannel
 
 
 async def test_restore_queue_without_current_starts_even_with_saved_pause(monkeypatch) -> None:
@@ -33,15 +25,11 @@ async def test_restore_queue_without_current_starts_even_with_saved_pause(monkey
     monkeypatch.setattr(recovery.discord, "StageChannel", type("FakeStage", (), {}))
     await recovery.restore_guild_playback_state(FakeBot(guild), guild.id, {
         "voice_channel_id": channel.id, "current": None, "paused": True,
-        "queue": [saved_track(FakeTrack("First")), saved_track(FakeTrack("Second"))],
+        "queue": [track_payload(FakeTrack("First")), track_payload(FakeTrack("Second"))],
     })
     assert player.current.title == "First"
     assert player.paused is False
     assert [track.title for track in player.queue] == ["Second"]
-
-
-def saved_track(track: FakeTrack) -> dict:
-    return {"raw_data": track.raw_data, "extras": track.extras, "title": track.title, "uri": track.uri}
 
 
 async def test_restore_guild_playback_state_reconnects_and_restores_player(monkeypatch) -> None:
@@ -82,8 +70,8 @@ async def test_restore_guild_playback_state_reconnects_and_restores_player(monke
             "loop_mode": "queue",
             "paused": True,
             "position": 30_000,
-            "current": saved_track(current),
-            "queue": [saved_track(queued)],
+            "current": track_payload(current),
+            "queue": [track_payload(queued)],
         },
     )
 
@@ -121,7 +109,7 @@ async def test_restore_guild_playback_state_skips_missing_voice_channel(monkeypa
     await recovery.restore_guild_playback_state(
         FakeBot(guild),
         guild.id,
-        {"voice_channel_id": 456, "current": saved_track(FakeTrack("Current")), "queue": []},
+        {"voice_channel_id": 456, "current": track_payload(FakeTrack("Current")), "queue": []},
     )
 
     assert updates == [(guild.id, None)]
@@ -170,7 +158,7 @@ async def test_restore_guild_playback_state_skips_missing_voice_permissions(monk
     await recovery.restore_guild_playback_state(
         FakeBot(guild),
         guild.id,
-        {"voice_channel_id": voice_channel.id, "current": saved_track(FakeTrack("Current")), "queue": []},
+        {"voice_channel_id": voice_channel.id, "current": track_payload(FakeTrack("Current")), "queue": []},
     )
 
     assert voice_channel.connect_kwargs is None
@@ -180,6 +168,6 @@ async def test_restore_guild_playback_state_skips_missing_voice_permissions(monk
 def test_restored_tracks_skips_malformed_entries() -> None:
     valid = FakeTrack("Valid")
 
-    tracks = recovery.restored_tracks([saved_track(valid), "bad", None])
+    tracks = recovery.restored_tracks([track_payload(valid), "bad", None])
 
     assert [track.title for track in tracks] == ["Valid"]

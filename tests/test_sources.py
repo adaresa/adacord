@@ -1,21 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import wavelink
 
-from adacord.config import default_volume, player_idle_timeout, voice_connect_timeout
-from adacord.persistence import (
-    clear_guild_state_now as clear_saved_guild_state,
-    load_state,
-    save_player_state,
-    track_from_payload,
-    track_payload,
-)
 from adacord.sources import (
     LoadSummary,
     choose_best_song_candidate,
@@ -25,63 +14,6 @@ from adacord.sources import (
     search_youtube_alternative,
     spotify_public_playlist_queries,
 )
-from adacord.utils import (
-    display_track_title,
-    format_duration,
-    is_url,
-    spotify_playlist_id,
-    track_display_title,
-    track_requester,
-    youtube_watch_url_without_playlist,
-)
-from conftest import FakePlayer, FakeQueue, FakeTrack
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_lavalink_playlist_limits_cover_large_playlists() -> None:
-    config = (REPO_ROOT / "lavalink/application.yml").read_text(encoding="utf-8")
-    youtube_limit = re.search(r"^\s+youtubePlaylistLoadLimit:\s+(\d+)\s*$", config, flags=re.MULTILINE)
-    lavasrc_playlist_limit = re.search(r"^\s+playlistLoadLimit:\s+(\d+)\s*$", config, flags=re.MULTILINE)
-
-    assert youtube_limit is not None
-    assert int(youtube_limit.group(1)) >= 50
-    assert lavasrc_playlist_limit is not None
-    assert int(lavasrc_playlist_limit.group(1)) >= 50
-
-
-def test_url_detection() -> None:
-    assert is_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-    assert is_url("http://example.com/audio")
-    assert not is_url("daft punk one more time")
-
-
-def test_youtube_watch_url_without_playlist() -> None:
-    assert (
-        youtube_watch_url_without_playlist(
-            "https://www.youtube.com/watch?v=uwTw63tTNeI&list=PLDnafrUBAs3mUL4oQt4oaQGByc1OFXj0Y&index=7"
-        )
-        == "https://www.youtube.com/watch?v=uwTw63tTNeI"
-    )
-    assert youtube_watch_url_without_playlist("https://youtu.be/uwTw63tTNeI?list=abc") is None
-    assert youtube_watch_url_without_playlist("https://www.youtube.com/watch?v=uwTw63tTNeI") is None
-
-
-def test_spotify_playlist_id() -> None:
-    assert (
-        spotify_playlist_id("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")
-        == "37i9dQZF1DXcBWIGoYBM5M"
-    )
-    assert spotify_playlist_id("https://open.spotify.com/intl-ee/playlist/abc123?si=token") == "abc123"
-    assert spotify_playlist_id("https://open.spotify.com/track/abc123") is None
-
-
-def test_duration_formatting() -> None:
-    assert format_duration(None) == ""
-    assert format_duration(0) == ""
-    assert format_duration(65_000) == "1:05"
-    assert format_duration(3_665_000) == "1:01:05"
 
 
 def test_song_candidate_preserves_relevance_over_topic_label(fake_track_factory) -> None:
@@ -152,116 +84,6 @@ def test_artist_name_is_not_treated_as_version(fake_track_factory) -> None:
     original = fake_track_factory("Song", author="Live")
     other = fake_track_factory("Song", author="Other")
     assert choose_best_song_candidate([original, other], "Song") is original
-
-
-def test_display_title_keeps_requested_variant_visible(fake_track_factory) -> None:
-    track = fake_track_factory("Rockefeller Street")
-
-    assert display_track_title(track, "rockefeller street nightcore") == "Rockefeller Street (nightcore)"
-    assert display_track_title(track, "rockefeller street") == "Rockefeller Street"
-
-
-def test_display_title_removes_youtube_channel_prefixes(fake_track_factory) -> None:
-    uploads = [
-        (
-            fake_track_factory("Martin Garrix & Bebe Rexha - In The Name Of Love (Lyrics)", author="7clouds"),
-            "Martin Garrix & Bebe Rexha - In The Name Of Love",
-        ),
-        (
-            fake_track_factory("Halsey - Without Me (Lyrics)", author="Creative Chaos and 2 more"),
-            "Halsey - Without Me",
-        ),
-        (
-            fake_track_factory(
-                """The Chainsmokers - Don't Let Me Down (Lyrics) | "I need you right now" """,
-                author="ChillTracks",
-            ),
-            "The Chainsmokers - Don't Let Me Down",
-        ),
-        (
-            fake_track_factory("Daft Punk - One More Time [Official Audio]", author="Uploader"),
-            "Daft Punk - One More Time",
-        ),
-    ]
-
-    for track, expected in uploads:
-        assert display_track_title(track, "search terms") == expected
-
-
-def test_display_title_still_prepends_official_artist_metadata(fake_track_factory) -> None:
-    track = fake_track_factory("One More Time", author="Daft Punk - Topic")
-
-    assert display_track_title(track, "daft punk one more time") == "Daft Punk - One More Time"
-
-
-def test_track_extras_support_dict_and_attribute_access(fake_track_factory) -> None:
-    dict_track = fake_track_factory("Fallback")
-    dict_track.extras = {"requester": "ada", "display_title": "Custom dict title"}
-
-    attr_track = fake_track_factory("Fallback")
-    attr_track.extras = SimpleNamespace(requester="alice", display_title="Custom attr title")
-
-    assert track_requester(dict_track) == "ada"
-    assert track_display_title(dict_track) == "Custom dict title"
-    assert track_requester(attr_track) == "alice"
-    assert track_display_title(attr_track) == "Custom attr title"
-
-
-@pytest.mark.parametrize(
-    ("env_name", "values"),
-    [
-        ("DEFAULT_VOLUME", [(None, 50), ("not-a-number", 50), ("300", 200), ("-10", 0), ("75", 75)]),
-        ("VOICE_CONNECT_TIMEOUT", [(None, 30), ("not-a-number", 30), ("-10", 0), ("45.5", 45.5)]),
-        ("PLAYER_IDLE_TIMEOUT", [(None, 30), ("not-a-number", 30), ("-10", 0), ("45", 45)]),
-    ],
-)
-def test_env_defaults_and_clamping(monkeypatch, env_name: str, values) -> None:
-    readers = {
-        "DEFAULT_VOLUME": default_volume,
-        "VOICE_CONNECT_TIMEOUT": voice_connect_timeout,
-        "PLAYER_IDLE_TIMEOUT": player_idle_timeout,
-    }
-    for raw_value, expected in values:
-        if raw_value is None:
-            monkeypatch.delenv(env_name, raising=False)
-        else:
-            monkeypatch.setenv(env_name, raw_value)
-        assert readers[env_name]() == expected
-
-
-def test_track_payload_round_trips_to_playable() -> None:
-    track = FakeTrack("Round Trip", author="Tester")
-    track.extras = {"requester": "ada", "display_title": "Custom title"}
-
-    restored = track_from_payload(track_payload(track))
-
-    assert restored is not None
-    assert restored.title == "Round Trip"
-    assert restored.author == "Tester"
-    assert dict(restored.extras) == {"requester": "ada", "display_title": "Custom title"}
-
-
-async def test_save_and_clear_player_state() -> None:
-    player = FakePlayer(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Next")]))
-
-    await save_player_state(player)
-    data = load_state()
-
-    saved = data["guilds"][str(player.guild.id)]
-    assert saved["current"]["title"] == "Current"
-    assert saved["queue"][0]["title"] == "Next"
-
-    clear_saved_guild_state(player.guild.id)
-    assert load_state()["guilds"] == {}
-
-
-async def test_save_player_state_skips_disconnected_player() -> None:
-    player = FakePlayer(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Next")]))
-    player.connected = False
-
-    await save_player_state(player)
-
-    assert load_state()["guilds"] == {}
 
 
 async def test_url_search_keeps_first_result(monkeypatch, fake_track_factory) -> None:

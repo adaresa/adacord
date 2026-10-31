@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import discord
 import pytest
 
 import adacord.config as config
+from adacord.sources import LoadSummary
 from adacord.state import guild_states
+from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, TrackRequestResult
 
 BOT_USER_ID = 1_000
 
@@ -343,6 +346,62 @@ class FakeInteraction:
 
     async def delete_original_response(self):
         self.deleted_original_response = True
+
+
+class FakeTask:
+    def __init__(self):
+        self.cancelled = False
+
+    def done(self) -> bool:
+        return False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class FakeBot:
+    def __init__(self, guild: FakeGuild):
+        self.guild = guild
+
+    def get_guild(self, guild_id: int):
+        return self.guild if guild_id == self.guild.id else None
+
+
+def last_response_text(interaction: FakeInteraction) -> str:
+    if interaction.response.sent:
+        return interaction.response.sent[-1]["args"][0]
+    return interaction.followup.sent[-1]["args"][0]
+
+
+def assert_no_text_response(interaction: FakeInteraction) -> None:
+    assert interaction.response.sent == []
+    assert interaction.followup.sent == []
+
+
+# queue_track_request outcomes that /play and the Add song modal report back to the user.
+REQUEST_FAILURES = [
+    pytest.param(TrackRequestLoadError("source down"), "Could not load that request: source down", id="load"),
+    pytest.param(TrackRequestPlaybackError("queue rejected"), "Could not start playback: queue rejected", id="playback"),
+    pytest.param(
+        TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False),
+        "No playable tracks were found.",
+        id="empty",
+    ),
+]
+
+
+@pytest.fixture
+def captured_tasks(monkeypatch) -> list[FakeTask]:
+    """Stub asyncio.create_task: close each coroutine and record the FakeTask returned for it."""
+    tasks: list[FakeTask] = []
+
+    def fake_create_task(coro):
+        coro.close()
+        tasks.append(FakeTask())
+        return tasks[-1]
+
+    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+    return tasks
 
 
 @pytest.fixture(autouse=True)

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from adacord import commands, ui
 from adacord.sources import LoadSummary
-from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, TrackRequestResult
+from adacord.track_requests import TrackRequestResult
 from conftest import (
+    REQUEST_FAILURES,
     FakeGuild,
     FakeInteraction,
     FakeMember,
@@ -14,57 +17,34 @@ from conftest import (
     FakeTextChannel,
     FakeTrack,
     FakeVoiceChannel,
+    assert_no_text_response,
+    last_response_text,
 )
 
 
-def last_response_text(interaction: FakeInteraction) -> str:
-    if interaction.response.sent:
-        return interaction.response.sent[-1]["args"][0]
-    return interaction.followup.sent[-1]["args"][0]
+VOICE_COMMANDS = {
+    "play": lambda interaction: commands.play_impl(interaction, "song"),
+    "join": lambda interaction: commands.join_impl(interaction),
+}
 
 
-def assert_no_text_response(interaction: FakeInteraction) -> None:
-    assert interaction.response.sent == []
-    assert interaction.followup.sent == []
+@pytest.mark.parametrize("command", VOICE_COMMANDS)
+@pytest.mark.parametrize(
+    ("in_guild", "expected"),
+    [(False, "This can only be used in a server."), (True, "Join a voice channel first.")],
+    ids=["dm", "outside_voice"],
+)
+async def test_voice_commands_reject_dm_and_user_outside_voice(command, in_guild, expected) -> None:
+    interaction = FakeInteraction(guild=FakeGuild(), user=object()) if in_guild else FakeInteraction(guild=None)
 
+    await VOICE_COMMANDS[command](interaction)
 
-async def test_play_rejects_dm() -> None:
-    interaction = FakeInteraction(guild=None)
-
-    await commands.play_impl(interaction, "song")
-
-    assert last_response_text(interaction) == "This can only be used in a server."
+    assert last_response_text(interaction) == expected
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
-async def test_play_rejects_user_outside_voice(monkeypatch) -> None:
-    interaction = FakeInteraction(guild=FakeGuild(), user=object())
-
-    await commands.play_impl(interaction, "song")
-
-    assert last_response_text(interaction) == "Join a voice channel first."
-    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-
-
-async def test_join_rejects_dm() -> None:
-    interaction = FakeInteraction(guild=None)
-
-    await commands.join_impl(interaction)
-
-    assert last_response_text(interaction) == "This can only be used in a server."
-    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-
-
-async def test_join_rejects_user_outside_voice(monkeypatch) -> None:
-    interaction = FakeInteraction(guild=FakeGuild(), user=object())
-
-    await commands.join_impl(interaction)
-
-    assert last_response_text(interaction) == "Join a voice channel first."
-    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-
-
-async def test_join_rejects_missing_voice_permissions_before_defer(monkeypatch) -> None:
+@pytest.mark.parametrize("command", VOICE_COMMANDS)
+async def test_voice_commands_reject_missing_voice_permissions_before_defer(monkeypatch, command) -> None:
     guild = FakeGuild()
     voice_channel = FakeVoiceChannel(
         guild=guild,
@@ -75,12 +55,31 @@ async def test_join_rejects_missing_voice_permissions_before_defer(monkeypatch) 
 
     monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: voice_channel)
 
-    await commands.join_impl(interaction)
+    await VOICE_COMMANDS[command](interaction)
 
     assert last_response_text(interaction) == "I need Connect and Speak permissions in Music."
     assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
     assert interaction.response.deferred is False
     assert voice_channel.connect_kwargs is None
+
+
+async def test_play_rejects_stage_channel_before_defer(monkeypatch) -> None:
+    class FakeStageChannel(FakeVoiceChannel):
+        pass
+
+    guild = FakeGuild()
+    stage_channel = FakeStageChannel(guild=guild, name="Town Hall")
+    interaction = FakeInteraction(guild=guild)
+
+    monkeypatch.setattr(ui.discord, "StageChannel", FakeStageChannel)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: stage_channel)
+
+    await commands.play_impl(interaction, "song")
+
+    assert last_response_text(interaction) == "I can't play in Stage channels. Join a regular voice channel."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.response.deferred is False
+    assert stage_channel.connect_kwargs is None
 
 
 async def test_join_connects_and_creates_idle_display(monkeypatch) -> None:
@@ -172,45 +171,8 @@ async def test_play_reports_connection_failure(monkeypatch) -> None:
     assert interaction.deleted_original_response is True
 
 
-async def test_play_rejects_missing_voice_permissions_before_defer(monkeypatch) -> None:
-    guild = FakeGuild()
-    voice_channel = FakeVoiceChannel(
-        guild=guild,
-        permissions=SimpleNamespace(view_channel=True, connect=False, speak=False),
-        name="Music",
-    )
-    interaction = FakeInteraction(guild=guild)
-
-    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: voice_channel)
-
-    await commands.play_impl(interaction, "song")
-
-    assert last_response_text(interaction) == "I need Connect and Speak permissions in Music."
-    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-    assert interaction.response.deferred is False
-    assert voice_channel.connect_kwargs is None
-
-
-async def test_play_rejects_stage_channel_before_defer(monkeypatch) -> None:
-    class FakeStageChannel(FakeVoiceChannel):
-        pass
-
-    guild = FakeGuild()
-    stage_channel = FakeStageChannel(guild=guild, name="Town Hall")
-    interaction = FakeInteraction(guild=guild)
-
-    monkeypatch.setattr(ui.discord, "StageChannel", FakeStageChannel)
-    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: stage_channel)
-
-    await commands.play_impl(interaction, "song")
-
-    assert last_response_text(interaction) == "I can't play in Stage channels. Join a regular voice channel."
-    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
-    assert interaction.response.deferred is False
-    assert stage_channel.connect_kwargs is None
-
-
-async def test_play_reports_load_failure(monkeypatch) -> None:
+@pytest.mark.parametrize(("outcome", "expected"), REQUEST_FAILURES)
+async def test_play_reports_request_failure_and_clears_deferred_response(monkeypatch, outcome, expected) -> None:
     interaction = FakeInteraction(guild=FakeGuild())
     player = FakePlayer(guild=interaction.guild, playing=False)
 
@@ -218,7 +180,9 @@ async def test_play_reports_load_failure(monkeypatch) -> None:
         return player
 
     async def fake_queue_track_request(player, query: str, requester: str):
-        raise TrackRequestLoadError("source down")
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
     monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: object())
     monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
@@ -226,49 +190,7 @@ async def test_play_reports_load_failure(monkeypatch) -> None:
 
     await commands.play_impl(interaction, "song")
 
-    assert last_response_text(interaction) == "Could not load that request: source down"
-    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
-    assert interaction.deleted_original_response is True
-
-
-async def test_play_reports_playback_start_failure(monkeypatch) -> None:
-    interaction = FakeInteraction(guild=FakeGuild())
-    player = FakePlayer(guild=interaction.guild, playing=False)
-
-    async def fake_ensure_player(guild, channel):
-        return player
-
-    async def fake_queue_track_request(player, query: str, requester: str):
-        raise TrackRequestPlaybackError("queue rejected")
-
-    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: object())
-    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
-    monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
-
-    await commands.play_impl(interaction, "song")
-
-    assert last_response_text(interaction) == "Could not start playback: queue rejected"
-    assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
-    assert interaction.deleted_original_response is True
-
-
-async def test_play_reports_empty_results_and_clears_deferred_response(monkeypatch) -> None:
-    interaction = FakeInteraction(guild=FakeGuild())
-    player = FakePlayer(guild=interaction.guild, playing=False)
-
-    async def fake_ensure_player(guild, channel):
-        return player
-
-    async def fake_queue_track_request(player, query: str, requester: str):
-        return TrackRequestResult([], LoadSummary("Nothing", 0, "youtube"), False)
-
-    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: object())
-    monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
-    monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
-
-    await commands.play_impl(interaction, "song")
-
-    assert last_response_text(interaction) == "No playable tracks were found."
+    assert last_response_text(interaction) == expected
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
     assert interaction.deleted_original_response is True
 
