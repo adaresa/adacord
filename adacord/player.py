@@ -306,15 +306,22 @@ def has_next_track(player: wavelink.Player) -> bool:
     return not queue.is_empty
 
 
-def can_start_next_track(player: wavelink.Player) -> bool:
-    return player.current is None and has_next_track(player)
+def can_start_next_track(player: wavelink.Player, replacing: wavelink.Playable | None = None) -> bool:
+    if player.current is not None and player.current is not replacing:
+        return False
+    return has_next_track(player)
 
 
-async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
+async def play_next(
+    player: wavelink.Player,
+    *,
+    replacing: wavelink.Playable | None = None,
+) -> wavelink.Playable | None:
     # Track end, /play, panel resume and recovery all advance the queue. Only start a
-    # track while the player is idle, so callers that race each other cannot pop two tracks.
+    # track while the player is idle (or still on `replacing`), so callers that race
+    # each other cannot pop two tracks.
     async with get_guild_state(player.guild.id).advance_lock:
-        if not can_start_next_track(player):
+        if not can_start_next_track(player, replacing):
             logger.debug(
                 "play_next skipped for guild %s: current=%s queue=%s",
                 player.guild.id,
@@ -331,7 +338,7 @@ async def play_next(player: wavelink.Player) -> wavelink.Playable | None:
             player.connected,
         )
         await wait_for_lavalink_voice(player)
-        if not can_start_next_track(player):
+        if not can_start_next_track(player, replacing):
             logger.debug("play_next skipped for guild %s: playback changed while waiting for voice", player.guild.id)
             return None
         return await _start_queued_track(player)

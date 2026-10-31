@@ -1204,40 +1204,127 @@ async def test_track_end_ignores_non_advancing_reasons(monkeypatch) -> None:
     assert list(player.queue) == queued
 
 
-async def test_track_exception_preserves_failed_track_and_queue_when_recovery_fails(monkeypatch) -> None:
+async def test_track_end_refreshes_display_and_saves_when_next_track_fails_to_start(monkeypatch) -> None:
+    player = FakePlayer(queue=FakeQueue([FakeTrack("Next")]))
+    calls = []
+
+    async def failing_play_next(seen_player):
+        raise RuntimeError("Lavalink did not finish connecting to voice (missing).")
+
+    async def fake_update(guild_id, seen_player):
+        calls.append(("update", guild_id, seen_player))
+
+    async def fake_save(seen_player):
+        calls.append(("save", seen_player))
+
+    monkeypatch.setattr(events, "play_next", failing_play_next)
+    monkeypatch.setattr(events, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(events, "save_player_state", fake_save)
+
+    await events.handle_track_end(SimpleNamespace(player=player, reason="finished"))
+
+    assert calls == [("update", player.guild.id, player), ("save", player)]
+
+
+async def test_track_exception_skips_to_next_track_when_recovery_fails(monkeypatch) -> None:
     failed = FakeTrack("Failed")
-    failed.position = 42_000
-    queued = [FakeTrack("Next")]
-    player = FakePlayer(current=failed, playing=True, queue=FakeQueue(queued), volume=70)
+    following = FakeTrack("Next")
+    # Lavalink's TrackEnd (loadFailed) has already cleared the player's current track.
+    player = FakePlayer(current=None, playing=False, queue=FakeQueue([following]), volume=70)
     calls = []
 
     async def fake_search(query, requester, *, limit=None):
         calls.append(("search", query, requester, limit))
         return []
 
-    async def fake_play_next(seen_player):
-        calls.append(("play_next", seen_player))
-
-    async def fake_save(seen_player, *, current, queued, position, paused):
-        calls.append(("save", seen_player, current, list(queued), position, paused))
-
     async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
+        calls.append(("update", guild_id, seen_player.current))
+
+    async def fake_save(seen_player):
+        calls.append(("save", seen_player.current))
 
     monkeypatch.setattr(events, "search_lavalink", fake_search)
-    monkeypatch.setattr(events, "play_next", fake_play_next)
-    monkeypatch.setattr(events, "save_preserved_player_state", fake_save)
     monkeypatch.setattr(events, "update_display_for_guild", fake_update)
+    monkeypatch.setattr(events, "save_player_state", fake_save)
 
     await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception="expired stream"))
 
-    assert ("play_next", player) not in calls
-    assert list(player.queue) == queued
+    assert player.current is following
+    assert player.play_calls == [(following, 70)]
+    assert list(player.queue) == []
     assert calls == [
         ("search", failed.uri, events.RECOVERY_REQUESTER, 1),
-        ("save", player, failed, queued, 42_000, False),
-        ("update", player.guild.id, player),
+        ("update", player.guild.id, following),
+        ("save", following),
     ]
+
+
+async def test_failed_track_does_not_skip_a_track_that_already_replaced_it(monkeypatch) -> None:
+    failed = FakeTrack("Failed")
+    already_playing = FakeTrack("Already playing")
+    queued = [FakeTrack("Queued")]
+    player = FakePlayer(current=already_playing, playing=True, queue=FakeQueue(queued))
+
+    async def fake_search(query, requester, *, limit=None):
+        return []
+
+    async def ignore(*args):
+        pass
+
+    monkeypatch.setattr(events, "search_lavalink", fake_search)
+    monkeypatch.setattr(events, "update_display_for_guild", ignore)
+    monkeypatch.setattr(events, "save_player_state", ignore)
+
+    await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception="broken stream"))
+
+    assert player.current is already_playing
+    assert player.play_calls == []
+    assert player.skip_calls == []
+    assert list(player.queue) == queued
+
+
+async def test_failed_track_from_retired_player_does_not_advance_its_queue(monkeypatch) -> None:
+    failed = FakeTrack("Failed")
+    queued = [FakeTrack("Old queued track")]
+    player = FakePlayer(current=failed, playing=True, queue=FakeQueue(queued))
+    player.connected = False
+    calls = []
+
+    async def unexpected(*args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(events, "search_lavalink", unexpected)
+    monkeypatch.setattr(events, "update_display_for_guild", unexpected)
+    monkeypatch.setattr(events, "save_player_state", unexpected)
+
+    await events.handle_track_stuck(SimpleNamespace(player=player, track=failed, threshold=10_000))
+
+    assert calls == []
+    assert player.play_calls == []
+    assert list(player.queue) == queued
+
+
+@pytest.mark.parametrize("mode", [wavelink.QueueMode.loop, wavelink.QueueMode.loop_all])
+async def test_unrecoverable_track_is_not_replayed_by_loop_modes(monkeypatch, mode) -> None:
+    failed = FakeTrack("Failed")
+    failed.extras = {events.RECOVERY_ATTEMPTED_EXTRA: True}
+    player = FakePlayer(current=failed, playing=True)
+    player.queue.mode = mode
+    player.queue.loaded = failed
+    player.queue.history = [failed]
+
+    async def ignore(*args):
+        pass
+
+    monkeypatch.setattr(events, "update_display_for_guild", ignore)
+    monkeypatch.setattr(events, "save_player_state", ignore)
+
+    await events.handle_track_stuck(SimpleNamespace(player=player, track=failed, threshold=10_000))
+
+    assert player.play_calls == []
+    assert player.skip_calls == [True]
+    assert player.queue.loaded is None
+    assert player.queue.history == []
 
 
 async def test_track_exception_replays_current_track_without_consuming_queue(monkeypatch) -> None:
@@ -1319,47 +1406,49 @@ async def test_track_exception_does_not_retry_a_recovery_track(monkeypatch) -> N
         calls.append(("search", query, requester, limit))
         return [FakeTrack("Unexpected")]
 
-    async def fake_save(seen_player, *, current, queued, position, paused):
-        calls.append(("preserve", current))
+    async def fake_save(seen_player):
+        calls.append(("save", seen_player.current))
 
     async def fake_update(guild_id, seen_player):
         calls.append(("update", guild_id))
 
     monkeypatch.setattr(events, "search_lavalink", fake_search)
-    monkeypatch.setattr(events, "save_preserved_player_state", fake_save)
+    monkeypatch.setattr(events, "save_player_state", fake_save)
     monkeypatch.setattr(events, "update_display_for_guild", fake_update)
 
     await events.handle_track_exception(SimpleNamespace(player=player, track=failed, exception="expired stream"))
 
-    assert calls == [("preserve", failed), ("update", player.guild.id)]
+    assert player.skip_calls == [True]
+    assert calls == [("update", player.guild.id), ("save", None)]
 
 
-async def test_track_stuck_preserves_failed_track_and_queue_when_recovery_errors(monkeypatch) -> None:
+async def test_track_stuck_skips_to_next_track_when_recovery_errors(monkeypatch) -> None:
     failed = FakeTrack("Failed")
-    queued = [FakeTrack("Next")]
-    player = FakePlayer(current=failed, playing=True, queue=FakeQueue(queued))
+    following = FakeTrack("Next")
+    player = FakePlayer(current=failed, playing=True, queue=FakeQueue([following]))
     calls = []
 
     async def fake_search(query, requester, *, limit=None):
         raise RuntimeError("source still broken")
 
-    async def fake_save(seen_player, *, current, queued, position, paused):
-        calls.append(("save", seen_player, current, list(queued), position, paused))
+    async def fake_save(seen_player):
+        calls.append(("save", seen_player.current))
 
     async def fake_update(guild_id, seen_player):
-        calls.append(("update", guild_id, seen_player))
+        calls.append(("update", guild_id, seen_player.current))
 
     monkeypatch.setattr(events, "search_lavalink", fake_search)
-    monkeypatch.setattr(events, "save_preserved_player_state", fake_save)
+    monkeypatch.setattr(events, "save_player_state", fake_save)
     monkeypatch.setattr(events, "update_display_for_guild", fake_update)
 
     await events.handle_track_stuck(SimpleNamespace(player=player, track=failed, threshold=10_000))
 
-    assert list(player.queue) == queued
-    assert player.play_calls == []
+    assert player.current is following
+    assert player.play_calls == [(following, 50)]
+    assert list(player.queue) == []
     assert calls == [
-        ("save", player, failed, queued, 0, False),
-        ("update", player.guild.id, player),
+        ("update", player.guild.id, following),
+        ("save", following),
     ]
 
 
