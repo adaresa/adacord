@@ -150,6 +150,11 @@ async def connect_for_interaction(interaction: discord.Interaction) -> wavelink.
         await respond(interaction, "Join a voice channel first.", ephemeral=True)
         return None
 
+    if isinstance(channel, discord.StageChannel):
+        # The bot would join as a suppressed listener and nobody would hear it.
+        await respond(interaction, "I can't play in Stage channels. Join a regular voice channel.", ephemeral=True)
+        return None
+
     try:
         validate_voice_channel_permissions(interaction.guild, channel)
     except MissingVoicePermissions as exc:

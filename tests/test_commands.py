@@ -193,6 +193,25 @@ async def test_play_rejects_missing_voice_permissions_before_defer(monkeypatch) 
     assert voice_channel.connect_kwargs is None
 
 
+async def test_play_rejects_stage_channel_before_defer(monkeypatch) -> None:
+    class FakeStageChannel(FakeVoiceChannel):
+        pass
+
+    guild = FakeGuild()
+    stage_channel = FakeStageChannel(guild=guild, name="Town Hall")
+    interaction = FakeInteraction(guild=guild)
+
+    monkeypatch.setattr(ui.discord, "StageChannel", FakeStageChannel)
+    monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: stage_channel)
+
+    await commands.play_impl(interaction, "song")
+
+    assert last_response_text(interaction) == "I can't play in Stage channels. Join a regular voice channel."
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
+    assert interaction.response.deferred is False
+    assert stage_channel.connect_kwargs is None
+
+
 async def test_play_reports_load_failure(monkeypatch) -> None:
     interaction = FakeInteraction(guild=FakeGuild())
     player = FakePlayer(guild=interaction.guild, playing=False)
