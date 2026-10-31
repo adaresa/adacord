@@ -776,8 +776,11 @@ def is_player_panel_message(message: discord.Message) -> bool:
 
 
 def is_bot_authored_message(message: discord.Message) -> bool:
-    author = getattr(message, "author", None)
-    return bool(author and getattr(author, "bot", False))
+    # Another bot (such as a second Adacord instance) can post panels with the same
+    # control ids; only adopt or delete messages this bot wrote.
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    bot_member = getattr(getattr(message, "guild", None), "me", None)
+    return author_id is not None and author_id == getattr(bot_member, "id", None)
 
 
 async def fetch_display_message(

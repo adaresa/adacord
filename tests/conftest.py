@@ -8,6 +8,8 @@ import pytest
 import adacord.config as config
 from adacord.state import guild_states
 
+BOT_USER_ID = 1_000
+
 
 class FakeTrack:
     def __init__(
@@ -235,7 +237,8 @@ class FakeMessage:
         self.deleted = False
         self.edits = []
         self.id = 789
-        self.author = author if author is not None else SimpleNamespace(bot=True)
+        self.guild = SimpleNamespace(me=SimpleNamespace(id=BOT_USER_ID))
+        self.author = author if author is not None else SimpleNamespace(bot=True, id=BOT_USER_ID)
         self.components = []
 
     async def edit(self, **kwargs):

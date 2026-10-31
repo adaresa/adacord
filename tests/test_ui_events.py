@@ -342,6 +342,32 @@ async def test_create_or_update_display_ignores_non_bot_saved_display_message() 
     assert state.display_message_id == created.id
 
 
+async def test_create_or_update_display_leaves_other_bots_panels_alone() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    own_panel = FakeMessage(view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)))
+    own_panel.id = 300
+    other_bot_panel = FakeMessage(
+        view=ui.PlayerPanelView(player.guild.id, ui.build_player_panel_model(player, player.guild.id)),
+        author=SimpleNamespace(bot=True, id=4242),
+    )
+    other_bot_panel.id = 200
+    channel.history_messages = [own_panel, other_bot_panel]
+    channel.messages_by_id[other_bot_panel.id] = other_bot_panel
+    state.display_message_id = other_bot_panel.id
+    state.display_channel = channel
+    state.display_channel_id = channel.id
+
+    recovered = await ui.create_or_update_display(player.guild.id, channel, player)
+
+    assert recovered is own_panel
+    assert channel.sent == []
+    assert other_bot_panel.edits == []
+    assert other_bot_panel.deleted is False
+    assert own_panel.edits[-1]["view"].has_components_v2()
+
+
 async def test_create_or_update_display_scans_history_and_cleans_duplicate_panels() -> None:
     channel = FakeTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
