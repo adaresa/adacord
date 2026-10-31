@@ -736,6 +736,30 @@ async def test_player_panel_add_button_opens_modal_without_connected_player(monk
     assert interaction.response.modal.guild_id == guild.id
 
 
+async def test_background_display_refresh_is_kept_until_it_finishes(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+    release = asyncio.Event()
+    refreshed = []
+
+    async def slow_update(guild_id, seen_player):
+        await release.wait()
+        refreshed.append((guild_id, seen_player))
+
+    monkeypatch.setattr(ui, "update_display_for_guild", slow_update)
+
+    before = set(ui.background_tasks)
+    ui.refresh_display_in_background(player.guild.id, player)
+    (task,) = ui.background_tasks - before
+
+    assert not task.done()
+
+    release.set()
+    await task
+
+    assert refreshed == [(player.guild.id, player)]
+    assert task not in ui.background_tasks
+
+
 async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatch) -> None:
     player = FakePlayer(playing=False)
     track = FakeTrack("One More Time")
@@ -756,16 +780,14 @@ async def test_add_song_modal_queues_track_refreshes_and_acknowledges(monkeypatc
     async def fake_create_display(guild_id, channel, seen_player, *, manage_refresh=True):
         updates.append((guild_id, seen_player, manage_refresh))
 
-    def fake_create_task(coro):
-        backgrounds.append(coro)
-        coro.close()
-        return None
+    def fake_background_refresh(guild_id, seen_player):
+        backgrounds.append((guild_id, seen_player))
 
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_display)
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(ui, "refresh_display_in_background", fake_background_refresh)
 
     modal = ui.AddSongModal(999)
     modal.query._value = "daft punk"
@@ -802,14 +824,12 @@ async def test_add_song_modal_connects_like_play_when_player_missing(monkeypatch
     async def fake_create_display(guild_id, channel, seen_player, *, manage_refresh=True):
         updates.append((guild_id, channel, seen_player, manage_refresh))
 
-    def fake_create_task(coro):
-        backgrounds.append(coro)
-        coro.close()
-        return None
+    def fake_background_refresh(guild_id, seen_player):
+        backgrounds.append((guild_id, seen_player))
 
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_display)
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(ui, "refresh_display_in_background", fake_background_refresh)
 
     modal = ui.AddSongModal(guild.id)
     modal.query._value = "daft punk"
@@ -837,14 +857,10 @@ async def test_add_song_modal_accepts_yes_for_play_next(monkeypatch) -> None:
     async def fake_update(guild_id, seen_player, *, manage_refresh=True):
         return None
 
-    def fake_create_task(coro):
-        coro.close()
-        return None
-
     monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
-    monkeypatch.setattr(ui.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(ui, "refresh_display_in_background", lambda guild_id, seen_player: None)
 
     modal = ui.AddSongModal(player.guild.id)
     modal.query._value = "daft punk"

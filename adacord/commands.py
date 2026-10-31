@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 import discord
@@ -14,7 +13,7 @@ from adacord.ui import (
     connect_for_interaction,
     create_or_update_display,
     player_for_interaction,
-    refresh_display_with_recommendations,
+    refresh_display_in_background,
     respond,
     respond_and_clear_deferred,
     update_display_for_guild,
@@ -88,7 +87,7 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
         await update_display_for_guild(interaction.guild.id, player, manage_refresh=False)
 
     await acknowledge(interaction)
-    asyncio.create_task(refresh_display_with_recommendations(interaction.guild.id, player))
+    refresh_display_in_background(interaction.guild.id, player)
 
 
 async def disconnect_impl(interaction: discord.Interaction) -> None:

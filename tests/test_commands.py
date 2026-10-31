@@ -136,16 +136,14 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
     async def fake_create_display(guild_id, seen_channel, seen_player, *, manage_refresh=True):
         calls.display.append((guild_id, seen_channel, seen_player, manage_refresh))
 
-    def fake_create_task(coro):
-        calls.background.append(coro)
-        coro.close()
-        return None
+    def fake_background_refresh(guild_id, seen_player):
+        calls.background.append((guild_id, seen_player))
 
     monkeypatch.setattr(ui, "user_voice_channel", lambda interaction: voice_channel)
     monkeypatch.setattr(ui, "ensure_player", fake_ensure_player)
     monkeypatch.setattr(commands, "queue_track_request", fake_queue_track_request)
     monkeypatch.setattr(commands, "create_or_update_display", fake_create_display)
-    monkeypatch.setattr(commands.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(commands, "refresh_display_in_background", fake_background_refresh)
 
     await commands.play_impl(interaction, "daft punk")
 
@@ -153,7 +151,7 @@ async def test_play_connects_loads_queues_and_updates_display(monkeypatch) -> No
     assert interaction.response.defer_kwargs == {"ephemeral": True, "thinking": True}
     assert player.current is track
     assert calls.display == [(guild.id, channel, player, False)]
-    assert len(calls.background) == 1
+    assert calls.background == [(guild.id, player)]
     assert interaction.deleted_original_response is True
     assert_no_text_response(interaction)
 

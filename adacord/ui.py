@@ -72,6 +72,16 @@ async def refresh_display_with_recommendations(guild_id: int, player: wavelink.P
         logger.exception("Failed to refresh player display with recommendations")
 
 
+background_tasks: set[asyncio.Task[None]] = set()
+
+
+def refresh_display_in_background(guild_id: int, player: wavelink.Player) -> None:
+    # The event loop only keeps weak references to tasks, so hold one until it finishes.
+    task = asyncio.create_task(refresh_display_with_recommendations(guild_id, player))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+
+
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
     if not interaction.guild:
         return None
@@ -660,7 +670,7 @@ class AddSongModal(discord.ui.Modal, title="Add song"):
         else:
             await update_display_for_guild(self.guild_id, player, manage_refresh=False)
         await acknowledge(interaction)
-        asyncio.create_task(refresh_display_with_recommendations(self.guild_id, player))
+        refresh_display_in_background(self.guild_id, player)
 
 
 def play_next_requested(value: str) -> bool | None:
