@@ -130,6 +130,32 @@ async def test_recommendations_skip_load_when_refresh_not_allowed(monkeypatch) -
     assert await recommendations.recommendations_for_player(player, allow_refresh=False) == ()
 
 
+async def test_recommendation_searches_run_concurrently_with_a_cap(monkeypatch) -> None:
+    queued = [FakeTrack(f"Queued {index}", author=f"Band {index}") for index in range(3)]
+    player = FakePlayer(current=FakeTrack("Current", author="Artist"), queue=FakeQueue(queued))
+    queries = recommendations.recommendation_queries(player)
+    in_flight = 0
+    max_in_flight = 0
+
+    async def fake_search(query, requester, *, limit=None):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0)
+        in_flight -= 1
+        if query == queries[1]:
+            raise RuntimeError("search failed")
+        return [FakeTrack(query)]
+
+    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
+
+    candidates = await recommendations.load_recommendation_candidates(player)
+
+    assert len(queries) > recommendations.RECOMMENDATION_SEARCH_CONCURRENCY
+    assert max_in_flight == recommendations.RECOMMENDATION_SEARCH_CONCURRENCY
+    assert [track.title for track in candidates] == [query for query in queries if query != queries[1]]
+
+
 async def test_recommendations_return_stale_cache_when_refresh_not_allowed(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"))
     now = time.monotonic()

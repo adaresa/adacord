@@ -546,6 +546,38 @@ async def test_progress_refresh_does_not_refresh_recommendations(monkeypatch) ->
     assert calls == [(player, False)]
 
 
+async def test_suggestion_loading_does_not_hold_the_display_lock(monkeypatch) -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    get_guild_state(player.guild.id).display_channel = channel
+    loading = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def slow_recommendations(seen_player, *, allow_refresh=True):
+        calls.append(allow_refresh)
+        if allow_refresh:
+            loading.set()
+            await release.wait()
+        return ()
+
+    monkeypatch.setattr(ui, "recommendations_for_player", slow_recommendations)
+    monkeypatch.setattr(ui, "ensure_display_refresh", lambda guild_id, seen_player: None)
+
+    refreshing = asyncio.create_task(ui.update_display_for_guild(player.guild.id, player))
+    await loading.wait()
+    await asyncio.wait_for(ui.update_display_for_guild(player.guild.id, player, manage_refresh=False), timeout=1)
+
+    assert len(channel.sent) == 1
+    assert not refreshing.done()
+
+    release.set()
+    await refreshing
+
+    assert calls == [True, False, False]
+    assert len(channel.sent) == 1
+
+
 async def test_player_panel_controls_update_player_silently(monkeypatch) -> None:
     player = FakePlayer(current=FakeTrack("Current"), playing=True, queue=FakeQueue([FakeTrack("Next")]), volume=50)
     updates = []

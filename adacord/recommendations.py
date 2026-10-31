@@ -15,6 +15,7 @@ RECOMMENDATION_CACHE_TTL = 10 * 60
 RECOMMENDATION_COUNT = 10
 RECOMMENDATION_REQUESTER = "Adacord suggestions"
 MAX_RECOMMENDATION_CACHE_ENTRIES_PER_GUILD = 20
+RECOMMENDATION_SEARCH_CONCURRENCY = 4
 RECOMMENDATION_VARIANT_TERMS = AVOID_TERMS | {
     "acapella",
     "a cappella",
@@ -332,12 +333,18 @@ async def load_recommendation_candidates(player: wavelink.Player) -> list[waveli
         track_log_label(player.current),
         len(queue_items(player)),
     )
-    candidates: list[wavelink.Playable] = []
-    for query in recommendation_queries(player):
-        try:
-            candidates.extend(await search_lavalink(query, RECOMMENDATION_REQUESTER, limit=SONG_SEARCH_LIMIT))
-        except Exception as exc:
-            logger.debug("Recommendation query %r failed: %s", query, exc)
+    semaphore = asyncio.Semaphore(RECOMMENDATION_SEARCH_CONCURRENCY)
+
+    async def search(query: str) -> list[wavelink.Playable]:
+        async with semaphore:
+            try:
+                return await search_lavalink(query, RECOMMENDATION_REQUESTER, limit=SONG_SEARCH_LIMIT)
+            except Exception as exc:
+                logger.debug("Recommendation query %r failed: %s", query, exc)
+                return []
+
+    results = await asyncio.gather(*(search(query) for query in recommendation_queries(player)))
+    candidates = [track for tracks in results for track in tracks]
     logger.debug(
         "Loaded %s recommendation candidate(s) for guild %s in %.2fs",
         len(candidates),

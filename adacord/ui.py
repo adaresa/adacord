@@ -981,6 +981,18 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
             state.display_refresh_task = None
 
 
+async def load_display_suggestions(
+    player: wavelink.Player | None,
+    *,
+    allow_refresh: bool,
+) -> tuple[Recommendation, ...]:
+    try:
+        return await recommendations_for_player(player, allow_refresh=allow_refresh)
+    except Exception:
+        logger.exception("Failed to load song recommendations")
+        return ()
+
+
 async def create_or_update_display(
     guild_id: int,
     channel: discord.abc.Messageable,
@@ -989,6 +1001,8 @@ async def create_or_update_display(
     manage_refresh: bool = True,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
+    if manage_refresh:
+        await load_display_suggestions(player, allow_refresh=True)
     async with state.display_lock:
         return await _create_or_update_display_locked(guild_id, channel, player, manage_refresh=manage_refresh)
 
@@ -1001,11 +1015,9 @@ async def _create_or_update_display_locked(
     manage_refresh: bool = True,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
-    try:
-        suggestions = await recommendations_for_player(player, allow_refresh=manage_refresh)
-    except Exception:
-        logger.exception("Failed to load song recommendations")
-        suggestions = ()
+    # Suggestion searches can take seconds, so callers fill the cache before taking the
+    # display lock and the panel only reads it here.
+    suggestions = await load_display_suggestions(player, allow_refresh=False)
     view = PlayerPanelView(guild_id, build_player_panel_model(player, guild_id, suggestions))
     state.display_channel = channel
     state.display_channel_id = getattr(channel, "id", None)
@@ -1063,6 +1075,8 @@ async def update_display_for_guild(
     manage_refresh: bool = True,
 ) -> None:
     state = get_guild_state(guild_id)
+    if manage_refresh and should_maintain_display(player) and state.display_channel:
+        await load_display_suggestions(player, allow_refresh=True)
     async with state.display_lock:
         if should_maintain_display(player) and state.display_channel:
             await _create_or_update_display_locked(guild_id, state.display_channel, player, manage_refresh=manage_refresh)
