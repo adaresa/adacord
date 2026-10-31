@@ -127,6 +127,10 @@ def player_state_snapshot(
 ) -> tuple[int, dict[str, Any] | None] | None:
     if not player:
         return None
+    if not getattr(player, "connected", True):
+        # A late save after an idle or /dc disconnect would make the bot rejoin on restart.
+        logger.debug("Not saving playback state for disconnected player in guild %s", player.guild.id)
+        return None
 
     current_track = player.current if current is DEFAULT_SNAPSHOT_VALUE else current
     queued_tracks = list(player.queue) if queued is DEFAULT_SNAPSHOT_VALUE else queued

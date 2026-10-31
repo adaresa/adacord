@@ -255,6 +255,15 @@ async def test_save_and_clear_player_state() -> None:
     assert load_state()["guilds"] == {}
 
 
+async def test_save_player_state_skips_disconnected_player() -> None:
+    player = FakePlayer(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Next")]))
+    player.connected = False
+
+    await save_player_state(player)
+
+    assert load_state()["guilds"] == {}
+
+
 async def test_url_search_keeps_first_result(monkeypatch, fake_track_factory) -> None:
     first = fake_track_factory("Specific video URL")
     better = fake_track_factory("Specific video URL lyrics")
