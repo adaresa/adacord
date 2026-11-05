@@ -19,7 +19,7 @@ from adacord.events import (
 )
 from adacord.player import connect_lavalink, get_player
 from adacord.recovery import restore_playback_state
-from adacord.ui import PlayerPanelView, handle_display_message_delete
+from adacord.ui import PlayerPanelView, display_rate_limit_trace, handle_display_message_delete
 
 load_dotenv()
 
@@ -88,7 +88,12 @@ def create_bot() -> AdacordBot:
     intents.guilds = True
     intents.voice_states = True
 
-    bot = AdacordBot(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
+    bot = AdacordBot(
+        command_prefix=commands.when_mentioned,
+        intents=intents,
+        help_command=None,
+        http_trace=display_rate_limit_trace(),
+    )
     setup_all_commands(bot)
     register_events(bot)
     return bot

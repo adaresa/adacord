@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 import discord
+from discord.http import HTTPClient, Route
 import pytest
 import wavelink
+from yarl import URL
 
 from adacord import persistence, recovery, ui
 from adacord.recommendations import Recommendation
@@ -83,6 +88,83 @@ class SlowTextChannel(FakeTextChannel):
     async def send(self, content: str | None = None, **kwargs):
         await asyncio.sleep(0)
         return await super().send(content, **kwargs)
+
+
+class HttpPanelMessage(FakeMessage):
+    """Edits through discord.py's real HTTP client, so 429s take the library's own retry path."""
+
+    def __init__(self, *args, http: HTTPClient, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.http = http
+
+    async def edit(self, **kwargs):
+        route = Route("PATCH", "/channels/{channel_id}/messages/{message_id}", channel_id=1, message_id=self.id)
+        await self.http.request(route, json={})
+        return await super().edit(**kwargs)
+
+
+class FakeDiscordApi:
+    def __init__(self) -> None:
+        self.http: HTTPClient | None = None
+        self.patches = 0
+        self.rate_limit_replies: list[tuple[float, bool]] = []
+        self.limit_window: float | None = None
+        self.next_edit_at = 0.0
+        self.rate_limited = 0
+
+    @staticmethod
+    def reply(data: dict, status: int = 200, headers: dict[str, str] | None = None) -> web.Response:
+        # discord.py only parses bodies whose content type is exactly application/json.
+        return web.Response(
+            body=json.dumps(data).encode(),
+            status=status,
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+
+    def rate_limit(self, retry_after: float, *, is_global: bool = False) -> web.Response:
+        headers = {"Via": "1.1 google", "Retry-After": str(retry_after), "X-RateLimit-Scope": "user"}
+        if is_global:
+            headers["X-RateLimit-Global"] = "true"
+        self.rate_limited += 1
+        return self.reply({"message": "rate limited", "retry_after": retry_after, "global": is_global}, 429, headers)
+
+    async def handle_me(self, request: web.Request) -> web.Response:
+        return self.reply({"id": "1", "username": "bot", "discriminator": "0", "avatar": None})
+
+    async def handle_patch(self, request: web.Request) -> web.Response:
+        self.patches += 1
+        if self.rate_limit_replies:
+            retry_after, is_global = self.rate_limit_replies.pop(0)
+            return self.rate_limit(retry_after, is_global=is_global)
+        now = asyncio.get_running_loop().time()
+        if self.limit_window is not None:
+            if now < self.next_edit_at:
+                return self.rate_limit(round(self.next_edit_at - now, 3))
+            self.next_edit_at = now + self.limit_window
+        return self.reply({"id": "789"})
+
+
+@pytest.fixture
+async def discord_api(monkeypatch):
+    api = FakeDiscordApi()
+    app = web.Application()
+    app.router.add_get("/users/@me", api.handle_me)
+    app.router.add_patch("/channels/{channel}/messages/{message}", api.handle_patch)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setattr(Route, "BASE", str(server.make_url("")).rstrip("/"))
+    api.http = HTTPClient(asyncio.get_running_loop(), http_trace=ui.display_rate_limit_trace())
+    await api.http.static_login("token")
+    yield api
+    await api.http.close()
+    await server.close()
+
+
+def attach_http_panel(player: FakePlayer, api: FakeDiscordApi) -> tuple[HttpPanelMessage, FakeTextChannel]:
+    channel = FakeTextChannel()
+    message = panel_message(player, HttpPanelMessage, http=api.http)
+    attach_display(get_guild_state(player.guild.id), message, channel)
+    return message, channel
 
 
 def test_build_player_panel_model_for_idle_state() -> None:
@@ -412,6 +494,209 @@ async def test_rate_limited_display_edit_records_retry_after(monkeypatch) -> Non
     assert state.display_rate_limit_until > asyncio.get_running_loop().time()
 
 
+async def test_trace_records_429_that_discord_py_retries_internally(discord_api) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+    message, channel = attach_http_panel(player, discord_api)
+    state = get_guild_state(player.guild.id)
+    discord_api.rate_limit_replies.append((0.01, False))
+
+    result = await ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False)
+
+    # The caller gets a normal result, so only the trace can tell it was rate limited.
+    assert result is message
+    assert discord_api.patches == 2
+    assert len(message.edits) == 1
+    assert state.display_refresh_backoff == 1
+    assert state.display_rate_limit_until > 0
+
+
+async def test_rate_limited_progress_edit_is_dropped_without_waiting(discord_api) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    message, channel = attach_http_panel(player, discord_api)
+    state = get_guild_state(player.guild.id)
+    discord_api.rate_limit_replies.append((30.0, False))
+
+    result = await asyncio.wait_for(
+        ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False, progress=True),
+        timeout=5,
+    )
+
+    assert result is None
+    assert discord_api.patches == 1
+    assert message.edits == []
+    assert channel.sent == []
+    assert state.display_message is message
+    assert state.display_progress_edit is None
+    assert not state.display_lock.locked()
+    assert ui.display_refresh_delay(player.guild.id, player) >= 29
+
+
+async def test_button_update_is_not_held_behind_rate_limited_progress_edit(discord_api) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    message, channel = attach_http_panel(player, discord_api)
+    state = get_guild_state(player.guild.id)
+    discord_api.rate_limit_replies.append((30.0, False))
+
+    progress = asyncio.create_task(
+        ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False, progress=True)
+    )
+    await asyncio.sleep(0)
+    assert state.display_lock.locked()
+
+    player.paused = True
+    await asyncio.wait_for(ui.update_display_for_guild(player.guild.id, player, manage_refresh=False), timeout=5)
+
+    assert await progress is None
+    assert discord_api.patches == 2
+    [button_edit] = message.edits
+    assert "Resume" in {getattr(item, "label", None) for item in button_edit["view"].walk_children()}
+
+
+async def test_global_rate_limit_is_waited_out_instead_of_cancelled(discord_api) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    message, channel = attach_http_panel(player, discord_api)
+    discord_api.rate_limit_replies.append((0.05, True))
+
+    result = await ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False, progress=True)
+
+    # Cancelling discord.py's sleep here would leave its global limit closed for every later request.
+    assert result is message
+    assert discord_api.patches == 2
+    assert discord_api.http._global_over.is_set()
+
+
+async def test_progress_refresh_loop_settles_below_the_edit_limit(discord_api, monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    message, _ = attach_http_panel(player, discord_api)
+    state = get_guild_state(player.guild.id)
+    discord_api.limit_window = 0.12
+
+    async def fake_save(seen_player):
+        pass
+
+    monkeypatch.setattr(ui, "DISPLAY_REFRESH_INTERVAL", 0.05)
+    monkeypatch.setattr(ui, "DISPLAY_COOLDOWN_SLACK", 0.01)
+    monkeypatch.setattr(ui, "save_player_state", fake_save)
+
+    loop_task = asyncio.create_task(ui.refresh_display_progress(player.guild.id, player))
+    await asyncio.sleep(1.5)
+    loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
+
+    # Each step up to the 0.2s interval can cost one 429; after that the panel keeps updating without any.
+    assert discord_api.rate_limited <= ui.MAX_DISPLAY_REFRESH_BACKOFF
+    assert state.display_refresh_backoff >= 1
+    assert len(message.edits) >= 3
+
+
+async def test_cancelling_refresh_loop_cancels_in_flight_progress_edit() -> None:
+    edit_started = asyncio.Event()
+    edit_cancelled = asyncio.Event()
+
+    class HangingMessage(FakeMessage):
+        async def edit(self, **kwargs):
+            edit_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                edit_cancelled.set()
+                raise
+
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    state = get_guild_state(player.guild.id)
+    attach_display(state, panel_message(player, HangingMessage), channel)
+
+    progress = asyncio.create_task(
+        ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False, progress=True)
+    )
+    await edit_started.wait()
+    progress.cancel()
+    await asyncio.gather(progress, return_exceptions=True)
+
+    await asyncio.wait_for(edit_cancelled.wait(), timeout=1)
+    assert progress.cancelled()
+    assert state.display_progress_edit is None
+
+
+async def test_display_refresh_backs_off_per_limit_window_and_recovers(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    guild_id = player.guild.id
+    state = get_guild_state(guild_id)
+    assert ui.display_refresh_interval(guild_id, player) == ui.DISPLAY_REFRESH_INTERVAL
+
+    for _ in range(3):
+        ui.record_display_rate_limit(guild_id, 5.0)
+    assert state.display_refresh_backoff == 1
+
+    for _ in range(ui.MAX_DISPLAY_REFRESH_BACKOFF + 2):
+        state.display_rate_limit_until = 0.0
+        ui.record_display_rate_limit(guild_id, 5.0)
+    assert state.display_refresh_backoff == ui.MAX_DISPLAY_REFRESH_BACKOFF
+    assert ui.display_refresh_interval(guild_id, player) == ui.IDLE_DISPLAY_REFRESH_INTERVAL
+
+    for _ in range(ui.DISPLAY_BACKOFF_RECOVERY_EDITS - 1):
+        ui.record_clean_progress_edit(guild_id)
+    ui.record_display_rate_limit(guild_id, 5.0)
+    assert state.display_clean_progress_edits == 0
+    assert state.display_refresh_backoff == ui.MAX_DISPLAY_REFRESH_BACKOFF
+
+    for _ in range(ui.DISPLAY_BACKOFF_RECOVERY_EDITS):
+        ui.record_clean_progress_edit(guild_id)
+    assert state.display_refresh_backoff == ui.MAX_DISPLAY_REFRESH_BACKOFF - 1
+    assert state.display_clean_progress_edits == 0
+
+
+async def test_progress_edit_yields_to_update_that_just_refreshed_the_panel() -> None:
+    channel = FakeTextChannel()
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    message = panel_message(player)
+    state = get_guild_state(player.guild.id)
+    attach_display(state, message, channel)
+
+    state.display_last_edit_at = asyncio.get_running_loop().time()
+    assert await ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False, progress=True) is None
+    assert message.edits == []
+
+    assert await ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False) is message
+    assert len(message.edits) == 1
+
+    state.display_last_edit_at -= ui.DISPLAY_REFRESH_INTERVAL
+    assert await ui.create_or_update_display(player.guild.id, channel, player, manage_refresh=False, progress=True) is message
+    assert len(message.edits) == 2
+
+
+@pytest.mark.parametrize(
+    ("method", "status", "path"),
+    [
+        ("GET", 429, "/api/v10/channels/1/messages/789"),
+        ("PATCH", 200, "/api/v10/channels/1/messages/789"),
+        ("PATCH", 429, "/api/v10/channels/1/messages/790"),
+        ("PATCH", 429, "/api/v10/guilds/1/members/789"),
+    ],
+)
+async def test_rate_limit_trace_ignores_unrelated_requests(method: str, status: int, path: str) -> None:
+    player = FakePlayer(current=FakeTrack("Current"))
+    state = get_guild_state(player.guild.id)
+    attach_display(state, panel_message(player), FakeTextChannel())
+    params = SimpleNamespace(
+        method=method,
+        url=URL(f"https://discord.com{path}"),
+        response=SimpleNamespace(status=status, headers={"Retry-After": "5"}),
+    )
+
+    await ui.handle_discord_request_end(None, None, params)
+
+    assert state.display_refresh_backoff == 0
+    assert state.display_rate_limit_until == 0.0
+
+
+def test_bot_observes_rate_limits_through_http_trace() -> None:
+    from adacord.bot import create_bot
+
+    assert ui.handle_discord_request_end in create_bot().http.http_trace.on_request_end
+
+
 async def test_concurrent_display_updates_send_only_one_panel() -> None:
     channel = SlowTextChannel()
     player = FakePlayer(current=FakeTrack("Current"))
@@ -464,33 +749,85 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
     state.display_channel = FakeTextChannel()
     calls = []
     delays = []
-    saves = []
 
     async def fake_sleep(delay):
         delays.append(delay)
 
-    async def fake_save(seen_player):
-        saves.append(seen_player)
-
-    async def fake_create_or_update(guild_id, channel, seen_player, *, manage_refresh=True):
-        calls.append((guild_id, channel, seen_player, manage_refresh))
+    async def fake_create_or_update(guild_id, channel, seen_player, *, manage_refresh=True, progress=False):
+        calls.append((guild_id, channel, seen_player, manage_refresh, progress))
         if len(calls) == 1:
             seen_player.paused = True
         else:
             seen_player.connected = False
 
     monkeypatch.setattr(ui.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(ui, "save_player_state", fake_save)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_or_update)
 
     await ui.refresh_display_progress(player.guild.id, player)
 
     assert delays == [ui.DISPLAY_REFRESH_INTERVAL, ui.IDLE_DISPLAY_REFRESH_INTERVAL]
     assert calls == [
-        (player.guild.id, state.display_channel, player, False),
-        (player.guild.id, state.display_channel, player, False),
+        (player.guild.id, state.display_channel, player, False, True),
+        (player.guild.id, state.display_channel, player, False, True),
     ]
-    assert saves == [player]
+
+
+async def test_playback_saves_continue_during_display_backoff_and_stop_with_the_loop(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    state = get_guild_state(player.guild.id)
+    state.display_channel = FakeTextChannel()
+    state.display_refresh_backoff = ui.MAX_DISPLAY_REFRESH_BACKOFF
+    saves = []
+    saved_enough = asyncio.Event()
+
+    async def fake_save(seen_player):
+        saves.append(seen_player)
+        if len(saves) >= 3:
+            saved_enough.set()
+
+    async def unexpected_update(*args, **kwargs):
+        raise AssertionError("the panel interval has not elapsed")
+
+    monkeypatch.setattr(ui, "PLAYBACK_SAVE_INTERVAL", 0.01)
+    monkeypatch.setattr(ui, "save_player_state", fake_save)
+    monkeypatch.setattr(ui, "create_or_update_display", unexpected_update)
+
+    loop_task = asyncio.create_task(ui.refresh_display_progress(player.guild.id, player))
+    await asyncio.wait_for(saved_enough.wait(), timeout=5)
+    assert not loop_task.done()
+
+    loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
+    saves_at_stop = len(saves)
+    await asyncio.sleep(0.05)
+
+    assert len(saves) == saves_at_stop
+
+
+async def test_playback_saves_skip_paused_player_and_survive_failures(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True, paused=True)
+    saves = []
+    saved_after_failure = asyncio.Event()
+
+    async def flaky_save(seen_player):
+        saves.append(seen_player)
+        if len(saves) == 1:
+            raise RuntimeError("disk trouble")
+        saved_after_failure.set()
+
+    monkeypatch.setattr(ui, "PLAYBACK_SAVE_INTERVAL", 0.01)
+    monkeypatch.setattr(ui, "save_player_state", flaky_save)
+
+    save_task = asyncio.create_task(ui.save_playback_progress(player))
+    await asyncio.sleep(0.05)
+    assert saves == []
+
+    player.paused = False
+    await asyncio.wait_for(saved_after_failure.wait(), timeout=5)
+    assert len(saves) == 2
+
+    save_task.cancel()
+    await asyncio.gather(save_task, return_exceptions=True)
 
 
 async def test_successful_display_edit_delays_automatic_refresh_budget() -> None:
