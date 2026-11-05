@@ -116,6 +116,10 @@ class FakeGuild:
         self.id = guild_id
         self.me = object()
         self.voice_client = None
+        self.voice_state_changes = []
+
+    async def change_voice_state(self, *, channel, **kwargs) -> None:
+        self.voice_state_changes.append(channel)
 
 
 class FakePlayer:

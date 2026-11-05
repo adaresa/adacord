@@ -5,7 +5,7 @@ import discord
 import wavelink
 
 from adacord.persistence import clear_guild_state as clear_saved_guild_state
-from adacord.persistence import save_player_state
+from adacord.persistence import playback_position, save_player_state
 from adacord.config import (
     LAVALINK_PASSWORD,
     LAVALINK_URI,
@@ -26,6 +26,8 @@ VOICE_PERMISSION_LABELS = {
     "connect": "Connect",
     "speak": "Speak",
 }
+VOICE_LEAVE_TIMEOUT = 5.0
+VOICE_LEAVE_POLL_INTERVAL = 0.1
 
 
 class MissingVoicePermissions(RuntimeError):
@@ -96,6 +98,46 @@ async def cleanup_voice_client(guild: discord.Guild, reason: str) -> None:
         logger.exception("Failed to clean up voice client for guild %s", guild.id)
 
 
+def bot_voice_channel(guild: discord.Guild) -> discord.abc.Connectable | None:
+    voice = getattr(getattr(guild, "me", None), "voice", None)
+    return getattr(voice, "channel", None)
+
+
+async def wait_for_voice_leave(guild: discord.Guild) -> None:
+    if not bot_voice_channel(guild):
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + VOICE_LEAVE_TIMEOUT
+    while bot_voice_channel(guild):
+        if loop.time() >= deadline:
+            logger.warning("Discord did not confirm the voice leave for guild %s in time", guild.id)
+            return
+        await asyncio.sleep(VOICE_LEAVE_POLL_INTERVAL)
+    # discord.py runs on_voice_state_update as a task, so let it see the refresh flag.
+    await asyncio.sleep(VOICE_LEAVE_POLL_INTERVAL)
+
+
+async def leave_voice(guild: discord.Guild, reason: str) -> None:
+    # Discord's leave confirmation destroys whichever Wavelink player is registered when
+    # it arrives, and a join for a channel the bot is still in gets no voice server update.
+    # Either one makes the next join time out, so only return once the leave has landed.
+    state = get_guild_state(guild.id)
+    was_refreshing = state.voice_refresh_in_progress
+    state.voice_refresh_in_progress = True
+    try:
+        had_voice_client = bool(guild.voice_client)
+        await cleanup_voice_client(guild, reason)
+        if not had_voice_client and bot_voice_channel(guild):
+            logger.warning("Leaving voice without a voice client for guild %s: %s", guild.id, reason)
+            await guild.change_voice_state(channel=None)
+        await wait_for_voice_leave(guild)
+    except Exception:
+        logger.exception("Failed to leave voice for guild %s", guild.id)
+    finally:
+        state.voice_refresh_in_progress = was_refreshing
+
+
 async def connect_voice_with_retry(
     guild: discord.Guild,
     target_channel: discord.VoiceChannel | discord.StageChannel,
@@ -110,7 +152,7 @@ async def connect_voice_with_retry(
                 timeout=voice_connect_timeout(),
             )
         except (wavelink.ChannelTimeoutException, TimeoutError):
-            await cleanup_voice_client(guild, "voice connection timed out")
+            await leave_voice(guild, "voice connection timed out")
             if attempt == 1:
                 raise
             logger.warning("Retrying voice connection for guild %s after timeout", guild.id)
@@ -149,7 +191,7 @@ async def ensure_player(
             return player
 
         if guild.voice_client:
-            await cleanup_voice_client(guild, "stale voice client before reconnect")
+            await leave_voice(guild, "stale voice client before reconnect")
 
         try:
             logger.info(
@@ -170,14 +212,14 @@ async def ensure_player(
             )
             return player
         except (Exception, asyncio.CancelledError):
-            await cleanup_voice_client(guild, "voice connection failed")
+            await leave_voice(guild, "voice connection failed")
             raise
 
 
 async def reconnect_player_voice(player: wavelink.Player) -> wavelink.Player:
     current = player.current
     queued = list(player.queue)
-    position = max(0, int(getattr(player, "position", 0) or 0))
+    position = playback_position(player)
     volume = player.volume if player.volume is not None else default_volume()
     target_channel = player.channel
     guild = player.guild
@@ -200,7 +242,7 @@ async def reconnect_player_voice(player: wavelink.Player) -> wavelink.Player:
                 position,
                 volume,
             )
-            await cleanup_voice_client(guild, "refreshing stale voice session")
+            await leave_voice(guild, "refreshing stale voice session")
             new_player = await connect_voice_with_retry(guild, target_channel)
             new_player.inactive_timeout = player_idle_timeout()
             new_player.inactive_channel_tokens = 1
@@ -215,6 +257,7 @@ async def reconnect_player_voice(player: wavelink.Player) -> wavelink.Player:
                     position,
                     track_log_label(current),
                 )
+                state.restored_position = position
                 await new_player.play(current, start=position, volume=volume, add_history=False, paused=False)
             logger.info(
                 "Refreshed voice session for guild %s: connected=%s current=%s queue=%s",
@@ -225,10 +268,16 @@ async def reconnect_player_voice(player: wavelink.Player) -> wavelink.Player:
             )
             return new_player
         except (Exception, asyncio.CancelledError):
-            await cleanup_voice_client(guild, "voice refresh failed")
+            await leave_voice(guild, "voice refresh failed")
             raise
         finally:
             state.voice_refresh_in_progress = False
+
+
+async def lavalink_voice_connected(player: wavelink.Player) -> bool:
+    # Lavalink errors propagate: being unable to ask says nothing about the voice session.
+    payload = await player.node.fetch_player_info(player.guild.id)
+    return bool(getattr(player, "connected", True) and payload and payload.state.connected)
 
 
 async def wait_for_lavalink_voice(player: wavelink.Player) -> None:
@@ -356,7 +405,7 @@ async def _start_queued_track(player: wavelink.Player) -> wavelink.Playable:
     extras = dict(track.extras)
     start = extras.pop("requested_start_ms", 0)
     await player.play(track, volume=volume, start=start, paused=False)
-    get_guild_state(player.guild.id).paused_at = None
+    get_guild_state(player.guild.id).restored_position = None
     track.extras = extras
     logger.debug(
         "Lavalink play call completed for guild %s: current=%s queue_after=%s playing=%s paused=%s",
@@ -394,7 +443,7 @@ def queue_items(player: wavelink.Player) -> list[wavelink.Playable]:
 
 async def clear_player(player: wavelink.Player) -> None:
     state = get_guild_state(player.guild.id)
-    state.paused_at = None
+    state.restored_position = None
     set_loop_mode(player, "none")
     player.queue.clear()
     player.queue.history.clear()

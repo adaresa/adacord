@@ -10,7 +10,6 @@ from adacord.persistence import save_player_state
 from adacord.player import add_tracks, play_next
 from adacord.recommendations import clear_guild_recommendation_cache
 from adacord.sources import LoadSummary, load_tracks
-from adacord.state import get_guild_state
 from adacord.utils import compact_log_value, track_log_label, youtube_start_position
 
 logger = logging.getLogger(__name__)
@@ -110,9 +109,6 @@ async def queue_track_request(
         raise TrackRequestPlaybackError(str(exc)) from exc
 
     await save_player_state(player)
-    state = get_guild_state(player.guild.id)
-    if not player.paused:
-        state.paused_at = None
     clear_guild_recommendation_cache(player.guild.id)
     logger.info(
         "Queued track request for guild %s in %.2fs: current=%s queue=%s playing=%s paused=%s",

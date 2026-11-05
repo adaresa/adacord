@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 import wavelink
 
+from adacord import events
+from adacord import player as player_module
 from adacord.persistence import load_state
 from adacord.player import (
     MissingVoicePermissions,
@@ -14,13 +16,80 @@ from adacord.player import (
     disconnect_player,
     ensure_player,
     has_next_track,
+    lavalink_voice_connected,
     play_next,
     reconnect_player_voice,
     set_loop_mode,
     set_volume,
 )
 from adacord.state import get_guild_state
-from conftest import FakeGuild, FakeNode, FakePlayer, FakeQueue, FakeTrack, FakeVoiceChannel
+from conftest import FakeBot, FakeGuild, FakeNode, FakePlayer, FakeQueue, FakeTrack, FakeVoiceChannel
+
+
+class FakeVoiceGateway:
+    """Discord's voice messages as discord.py delivers them.
+
+    A leave confirmation arrives a moment after the request and destroys whichever
+    player is registered by then, and a join for a channel the bot is already in
+    gets no voice server update, so that join can only time out.
+    """
+
+    LATENCY = 0.01
+
+    def __init__(self, guild: FakeGuild, channel: FakeVoiceChannel, *, on_leave=None):
+        self.guild = guild
+        self.channel = channel
+        self.on_leave = on_leave
+        self.leaves_pending = 0
+        self.leave_handlers: list[asyncio.Task] = []
+        self.join_pending = False
+        self.joined_players: list[FakePlayer] = []
+        self.destroyed: list[FakePlayer] = []
+        guild.me = SimpleNamespace(voice=SimpleNamespace(channel=channel))
+
+    def player(self, **kwargs) -> FakePlayer:
+        gateway = self
+
+        class GatewayPlayer(FakePlayer):
+            async def disconnect(self, *args, **kwargs) -> None:
+                await super().disconnect(*args, **kwargs)
+                gateway.request_leave()
+
+        player = GatewayPlayer(guild=self.guild, **kwargs)
+        player.channel = self.channel
+        return player
+
+    def request_leave(self) -> None:
+        self.leaves_pending += 1
+        asyncio.get_running_loop().call_later(self.LATENCY, self.deliver_leave)
+
+    def deliver_leave(self) -> None:
+        self.leaves_pending -= 1
+        registered = self.guild.voice_client
+        if registered:
+            registered.connected = False
+            self.guild.voice_client = None
+            self.destroyed.append(registered)
+        self.guild.me.voice = SimpleNamespace(channel=self.channel) if self.join_pending else None
+        self.join_pending = False
+        if self.on_leave:
+            self.leave_handlers.append(asyncio.create_task(self.on_leave()))
+
+    async def settle(self) -> None:
+        while self.leaves_pending:
+            await asyncio.sleep(self.LATENCY)
+        await asyncio.gather(*self.leave_handlers)
+
+    async def connect(self, **kwargs) -> FakePlayer:
+        already_joined = self.guild.me.voice is not None and not self.leaves_pending
+        self.join_pending = bool(self.leaves_pending)
+        player = self.player()
+        self.joined_players.append(player)
+        await asyncio.sleep(self.LATENCY * 3)
+        if already_joined or player in self.destroyed:
+            raise wavelink.ChannelTimeoutException("no voice server update")
+        self.guild.me.voice = SimpleNamespace(channel=self.channel)
+        return player
 
 
 async def test_add_tracks_starts_playback_when_idle() -> None:
@@ -280,6 +349,151 @@ async def test_failed_voice_refresh_cleans_up_and_keeps_saved_state(monkeypatch,
     assert saved["position"] == 45_000
     assert saved["volume"] == 80
     assert saved["paused"] is True
+
+
+async def test_voice_refresh_waits_for_leave_confirmation_before_rejoining(monkeypatch) -> None:
+    guild = FakeGuild()
+    channel = FakeVoiceChannel(guild=guild)
+    gateway = FakeVoiceGateway(guild, channel)
+    current = FakeTrack("Current")
+    current.position = 127_020
+    queued = [FakeTrack(f"Queued {index}") for index in range(23)]
+    old = gateway.player(current=current, queue=FakeQueue(queued), paused=True)
+    monkeypatch.setattr(channel, "connect", gateway.connect)
+
+    result = await reconnect_player_voice(old)
+
+    assert gateway.joined_players == [result]
+    assert gateway.destroyed == []
+    assert result.connected is True
+    assert guild.voice_client is result
+    assert result.play_kwargs == [{"start": 127_020, "add_history": False, "paused": False}]
+    assert list(result.queue) == queued
+
+
+async def test_voice_retry_leaves_channel_after_player_was_destroyed_locally(monkeypatch) -> None:
+    guild = FakeGuild()
+    channel = FakeVoiceChannel(guild=guild)
+    gateway = FakeVoiceGateway(guild, channel)
+    attempts = []
+
+    async def connect(**kwargs):
+        attempts.append(guild.me.voice)
+        if len(attempts) == 1:
+            raise wavelink.ChannelTimeoutException("no voice server update")
+        return gateway.player()
+
+    async def change_voice_state(*, channel):
+        guild.voice_state_changes.append(channel)
+        gateway.request_leave()
+
+    monkeypatch.setattr(channel, "connect", connect)
+    monkeypatch.setattr(guild, "change_voice_state", change_voice_state)
+
+    result = await ensure_player(guild, channel)
+
+    assert guild.voice_state_changes == [None]
+    assert attempts[1] is None
+    assert guild.voice_client is result
+
+
+async def test_leave_confirmation_after_failed_voice_refresh_keeps_saved_queue(monkeypatch) -> None:
+    guild = FakeGuild()
+    channel = FakeVoiceChannel(guild=guild)
+    bot = FakeBot(guild)
+    gateway = FakeVoiceGateway(
+        guild,
+        channel,
+        on_leave=lambda: events.handle_bot_voice_disconnect(bot, guild.id, None),
+    )
+    old = gateway.player(current=FakeTrack("Current"), queue=FakeQueue([FakeTrack("Next")]), paused=True)
+    state = get_guild_state(guild.id)
+
+    async def connect(**kwargs):
+        player = gateway.player()
+        guild.me.voice = SimpleNamespace(channel=channel)
+        return player
+
+    async def voice_never_ready(player):
+        raise RuntimeError("Lavalink did not finish connecting to voice")
+
+    monkeypatch.setattr(channel, "connect", connect)
+    monkeypatch.setattr(player_module, "wait_for_lavalink_voice", voice_never_ready)
+
+    with pytest.raises(RuntimeError):
+        await reconnect_player_voice(old)
+    await gateway.settle()
+
+    assert gateway.leave_handlers
+    assert guild.me.voice is None
+    assert state.voice_refresh_in_progress is False
+    saved = load_state()["guilds"][str(guild.id)]
+    assert saved["current"]["title"] == "Current"
+    assert saved["queue"][0]["title"] == "Next"
+
+
+async def test_unconfirmed_voice_leave_does_not_block_rejoin(monkeypatch) -> None:
+    guild = FakeGuild()
+    channel = FakeVoiceChannel(guild=guild)
+    guild.me = SimpleNamespace(voice=SimpleNamespace(channel=channel))
+    old = FakePlayer(guild=guild, current=FakeTrack("Current"), paused=True)
+    old.channel = channel
+    monkeypatch.setattr(player_module, "VOICE_LEAVE_TIMEOUT", 0.01)
+    monkeypatch.setattr(player_module, "VOICE_LEAVE_POLL_INTERVAL", 0.001)
+
+    result = await reconnect_player_voice(old)
+
+    assert old.disconnect_calls == 1
+    assert guild.voice_client is result
+
+
+async def test_voice_refresh_keeps_restored_position_when_wavelink_reports_zero() -> None:
+    guild = FakeGuild()
+    current = FakeTrack("Current")
+    old = FakePlayer(guild=guild, current=current, paused=True)
+    old.channel = FakeVoiceChannel(guild=guild)
+    state = get_guild_state(guild.id)
+    state.restored_position = 157_440
+    assert old.position == 0
+
+    result = await reconnect_player_voice(old)
+
+    assert result.play_kwargs[-1]["start"] == 157_440
+    assert load_state()["guilds"][str(guild.id)]["position"] == 157_440
+
+
+async def test_next_track_forgets_restored_position() -> None:
+    player = FakePlayer(queue=FakeQueue([FakeTrack("Next")]), playing=False)
+    state = get_guild_state(player.guild.id)
+    state.restored_position = 157_440
+
+    await play_next(player)
+
+    assert state.restored_position is None
+
+
+@pytest.mark.parametrize(
+    ("node_connected", "player_connected", "expected"),
+    [(True, True, True), (False, True, False), (True, False, False)],
+    ids=["healthy", "lavalink_dropped", "player_retired"],
+)
+async def test_lavalink_voice_connected(node_connected, player_connected, expected) -> None:
+    player = FakePlayer()
+    player.node = FakeNode(connected=node_connected)
+    player.connected = player_connected
+
+    assert await lavalink_voice_connected(player) is expected
+
+
+async def test_lavalink_voice_connected_is_false_without_lavalink_player() -> None:
+    class MissingPlayerNode(FakeNode):
+        async def fetch_player_info(self, guild_id: int):
+            return None
+
+    player = FakePlayer()
+    player.node = MissingPlayerNode()
+
+    assert await lavalink_voice_connected(player) is False
 
 
 async def test_set_volume_clamps_values() -> None:

@@ -5,18 +5,21 @@ from types import SimpleNamespace
 
 import discord
 import pytest
+import wavelink
 
-from adacord import ui
+from adacord import persistence, recovery, ui
 from adacord.recommendations import Recommendation
 from adacord.sources import LoadSummary
 from adacord.state import get_guild_state, guild_states
 from adacord.track_requests import TrackRequestResult
 from conftest import (
     REQUEST_FAILURES,
+    FakeBot,
     FakeGuild,
     FakeInteraction,
     FakeMember,
     FakeMessage,
+    FakeNode,
     FakePlayer,
     FakeQueue,
     FakeTask,
@@ -605,34 +608,75 @@ async def test_player_panel_controls_update_player_silently(monkeypatch) -> None
     assert len(updates) == 6
 
 
-async def test_pause_records_pause_time(monkeypatch) -> None:
-    player = FakePlayer(current=FakeTrack("Current"), paused=False, playing=True)
+@pytest.fixture
+def display_updates(monkeypatch) -> list:
+    # FakePlayer is not a wavelink.Player, so read the registered voice client directly.
+    monkeypatch.setattr(ui, "get_player", lambda guild: guild.voice_client)
     updates = []
 
     async def fake_update(guild_id, seen_player):
         updates.append((guild_id, seen_player))
 
-    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: player)
     monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+    return updates
 
+
+def fail_reconnect(monkeypatch, error: Exception) -> list:
+    reconnects = []
+
+    async def fake_reconnect(seen_player):
+        reconnects.append(seen_player)
+        raise error
+
+    monkeypatch.setattr(ui, "reconnect_player_voice", fake_reconnect)
+    return reconnects
+
+
+def save_paused_session(guild: FakeGuild) -> None:
+    persistence.save_guild_snapshot(
+        guild.id,
+        {
+            "voice_channel_id": 456,
+            "paused": True,
+            "position": 127_020,
+            "current": persistence.track_payload(FakeTrack("Current")),
+            "queue": [persistence.track_payload(FakeTrack("Next"))],
+        },
+    )
+
+
+async def test_pause_pauses_and_refreshes_panel(display_updates) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), paused=False, playing=True)
     interaction = FakeInteraction(guild=player.guild)
 
     await panel_view(player).pause_resume(interaction)
 
-    state = get_guild_state(player.guild.id)
     assert player.pause_calls == [True]
-    assert state.paused_at is not None
     assert interaction.response.deferred is True
-    assert updates == [(player.guild.id, player)]
+    assert display_updates == [(player.guild.id, player)]
 
 
-async def test_resume_after_long_pause_refreshes_voice_before_playing(monkeypatch) -> None:
+async def test_resume_with_healthy_voice_only_unpauses(monkeypatch, display_updates) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), paused=True, playing=True)
+    reconnects = fail_reconnect(monkeypatch, RuntimeError("must not rebuild healthy voice"))
+    interaction = FakeInteraction(guild=player.guild)
+
+    await panel_view(player).pause_resume(interaction)
+
+    assert reconnects == []
+    assert player.pause_calls == [False]
+    assert player.disconnect_calls == 0
+    assert_no_text_response(interaction)
+    assert display_updates == [(player.guild.id, player)]
+
+
+async def test_resume_with_dropped_voice_refreshes_session(monkeypatch, display_updates) -> None:
     old_player = FakePlayer(current=FakeTrack("Current"), paused=True, playing=True)
+    old_player.node = FakeNode(connected=False)
     new_player = FakePlayer(guild=old_player.guild, current=old_player.current, paused=False, playing=True)
     old_player.guild.voice_client = old_player
-    state = get_guild_state(old_player.guild.id)
-    state.paused_at = ui.time.monotonic() - ui.LONG_PAUSE_VOICE_RECONNECT_SECONDS - 1
-    updates = []
+    refresh_task = FakeTask()
+    get_guild_state(old_player.guild.id).display_refresh_task = refresh_task
     reconnects = []
 
     async def fake_reconnect(seen_player):
@@ -640,22 +684,142 @@ async def test_resume_after_long_pause_refreshes_voice_before_playing(monkeypatc
         old_player.guild.voice_client = new_player
         return new_player
 
-    async def fake_update(guild_id, seen_player):
-        updates.append((guild_id, seen_player))
-
-    monkeypatch.setattr(ui, "player_for_interaction", lambda interaction: interaction.guild.voice_client)
     monkeypatch.setattr(ui, "reconnect_player_voice", fake_reconnect)
-    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
-
     interaction = FakeInteraction(guild=old_player.guild)
 
     await panel_view(old_player).pause_resume(interaction)
 
     assert reconnects == [old_player]
     assert old_player.pause_calls == []
-    assert state.paused_at is None
+    assert refresh_task.cancelled is True
+    assert "reconnecting" in last_response_text(interaction)
+    assert display_updates == [(old_player.guild.id, new_player)]
+
+
+async def test_resume_when_lavalink_is_unreachable_leaves_voice_alone(monkeypatch, display_updates) -> None:
+    class UnreachableNode(FakeNode):
+        async def fetch_player_info(self, guild_id: int):
+            raise RuntimeError("Lavalink is restarting.")
+
+    player = FakePlayer(current=FakeTrack("Current"), paused=True, playing=True)
+    player.node = UnreachableNode()
+    reconnects = fail_reconnect(monkeypatch, RuntimeError("must not rebuild voice"))
+    interaction = FakeInteraction(guild=player.guild)
+
+    await panel_view(player).pause_resume(interaction)
+
+    assert reconnects == []
+    assert player.disconnect_calls == 0
+    assert player.paused is True
+    assert last_response_text(interaction).startswith("Could not resume: Lavalink is restarting.")
+    assert display_updates == []
+
+
+async def test_failed_voice_refresh_keeps_panel_and_explains_retry(monkeypatch, display_updates) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), paused=True, playing=True)
+    player.node = FakeNode(connected=False)
+    fail_reconnect(monkeypatch, wavelink.ChannelTimeoutException("Unable to connect."))
+    interaction = FakeInteraction(guild=player.guild)
+
+    await panel_view(player).pause_resume(interaction)
+
+    assert "press Resume to try again" in last_response_text(interaction)
+    assert display_updates == []
+
+
+async def test_resume_without_player_restores_saved_session_unpaused(monkeypatch, display_updates) -> None:
+    guild = FakeGuild()
+    save_paused_session(guild)
+    restores = []
+    bot = FakeBot(guild)
+
+    async def fake_restore(seen_bot, guild_id, saved):
+        restores.append((seen_bot, guild_id, saved["paused"], saved["position"]))
+        assert get_guild_state(guild_id).voice_refresh_in_progress is True
+        guild.voice_client = FakePlayer(guild=guild, current=FakeTrack("Current"))
+
+    monkeypatch.setattr(recovery, "restore_guild_playback_state", fake_restore)
+    interaction = FakeInteraction(guild=guild)
+    interaction.client = bot
+
+    await ui.PlayerPanelView(guild.id).pause_resume(interaction)
+
+    assert restores == [(bot, guild.id, False, 127_020)]
+    assert get_guild_state(guild.id).voice_refresh_in_progress is False
     assert interaction.response.deferred is True
-    assert updates == [(old_player.guild.id, new_player)]
+    assert_no_text_response(interaction)
+
+
+async def test_failed_saved_session_restore_keeps_queue_for_retry(monkeypatch) -> None:
+    guild = FakeGuild()
+    save_paused_session(guild)
+
+    async def fake_restore(seen_bot, guild_id, saved):
+        raise wavelink.ChannelTimeoutException("Unable to connect.")
+
+    monkeypatch.setattr(recovery, "restore_guild_playback_state", fake_restore)
+    interaction = FakeInteraction(guild=guild)
+    interaction.client = FakeBot(guild)
+
+    await ui.PlayerPanelView(guild.id).pause_resume(interaction)
+
+    assert "press Resume to try again" in last_response_text(interaction)
+    assert get_guild_state(guild.id).voice_refresh_in_progress is False
+    assert persistence.saved_playback_for_guild(guild.id) is not None
+
+
+async def test_resume_without_player_or_saved_session_says_nothing_to_resume() -> None:
+    guild = FakeGuild()
+    interaction = FakeInteraction(guild=guild)
+
+    await ui.PlayerPanelView(guild.id).pause_resume(interaction)
+
+    assert last_response_text(interaction) == "Nothing to pause or resume."
+
+
+async def test_stop_without_player_dismisses_saved_session(display_updates) -> None:
+    guild = FakeGuild()
+    save_paused_session(guild)
+    interaction = FakeInteraction(guild=guild)
+
+    await ui.PlayerPanelView(guild.id).stop(interaction)
+
+    assert persistence.saved_playback_for_guild(guild.id) is None
+    assert display_updates == [(guild.id, None)]
+    assert_no_text_response(interaction)
+
+
+async def test_stop_without_player_or_saved_session_reports_not_connected() -> None:
+    guild = FakeGuild()
+    interaction = FakeInteraction(guild=guild)
+
+    await ui.PlayerPanelView(guild.id).stop(interaction)
+
+    assert last_response_text(interaction) == "Not connected."
+
+
+async def test_controls_explain_themselves_during_voice_refresh() -> None:
+    guild = FakeGuild()
+    view = ui.PlayerPanelView(guild.id)
+    interaction = FakeInteraction(guild=guild)
+
+    assert await view.interaction_check(interaction) is True
+    assert_no_text_response(interaction)
+
+    get_guild_state(guild.id).voice_refresh_in_progress = True
+
+    assert await view.interaction_check(interaction) is False
+    assert last_response_text(interaction) == "Reconnecting to voice, try again in a few seconds."
+
+
+async def test_control_errors_are_reported_to_the_user() -> None:
+    guild = FakeGuild()
+    interaction = FakeInteraction(guild=guild)
+
+    await ui.PlayerPanelView(guild.id).on_error(interaction, RuntimeError("Lavalink said no"), SimpleNamespace())
+
+    assert last_response_text(interaction) == "That didn't work: Lavalink said no"
+    assert interaction.response.sent[-1]["kwargs"]["ephemeral"] is True
 
 
 @pytest.mark.parametrize("connected", [True, False], ids=["connected", "without_player"])

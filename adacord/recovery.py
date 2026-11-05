@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 import discord
@@ -160,6 +159,7 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
             bool(saved.get("paused")),
             track_log_label(current_track),
         )
+        state.restored_position = start
         await player.play(
             current_track,
             start=start,
@@ -167,7 +167,6 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
             paused=bool(saved.get("paused")),
             add_history=False,
         )
-        state.paused_at = time.monotonic() if bool(saved.get("paused")) else None
     elif queued_tracks:
         await play_next(player)
 

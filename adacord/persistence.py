@@ -25,6 +25,13 @@ def state_path() -> Path:
     return Path(playback_state_file())
 
 
+def playback_position(player: wavelink.Player) -> int:
+    # Wavelink reports zero until Lavalink's first position update, and a track
+    # restored while paused gets none, so fall back to the offset we started it at.
+    position = max(0, int(getattr(player, "position", 0) or 0))
+    return position or get_guild_state(player.guild.id).restored_position or 0
+
+
 def load_state() -> dict[str, Any]:
     path = state_path()
     if not path.exists():
@@ -45,6 +52,25 @@ def load_state() -> dict[str, Any]:
         data["guilds"] = {}
     data["version"] = STATE_VERSION
     return data
+
+
+def saved_playback_has_music(saved: dict[str, Any]) -> bool:
+    current = saved.get("current")
+    queue = saved.get("queue")
+    return isinstance(current, dict) or bool(queue if isinstance(queue, list) else [])
+
+
+def saved_playback_for_guild(guild_id: int) -> dict[str, Any] | None:
+    data = load_state()
+    guilds = data.get("guilds")
+    if not isinstance(guilds, dict):
+        return None
+    saved = guilds.get(str(guild_id))
+    if not isinstance(saved, dict):
+        return None
+    if not isinstance(saved.get("voice_channel_id"), int) or not saved_playback_has_music(saved):
+        return None
+    return saved
 
 
 def write_state(data: dict[str, Any]) -> None:
@@ -143,7 +169,7 @@ def player_state_snapshot(
     voice_channel_id = getattr(channel, "id", None) or state.voice_channel_id
     display_channel_id = state.display_channel_id or getattr(state.display_channel, "id", None)
     display_message_id = state.display_message_id or getattr(state.display_message, "id", None)
-    saved_position = player.position if position is None else position
+    saved_position = playback_position(player) if position is None else position
     saved_paused = bool(player.paused) if paused is None else paused
 
     return player.guild.id, {

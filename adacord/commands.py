@@ -12,6 +12,7 @@ from adacord.ui import (
     acknowledge,
     connect_for_interaction,
     create_or_update_display,
+    dismiss_saved_playback,
     player_for_interaction,
     refresh_display_in_background,
     respond,
@@ -93,7 +94,10 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
 async def disconnect_impl(interaction: discord.Interaction) -> None:
     player = player_for_interaction(interaction)
     if not player:
-        await respond(interaction, "Not connected.", ephemeral=True)
+        if interaction.guild_id and await dismiss_saved_playback(interaction.guild_id):
+            await acknowledge(interaction)
+        else:
+            await respond(interaction, "Not connected.", ephemeral=True)
         return
     guild_id = player.guild.id
     await disconnect_player(player)
