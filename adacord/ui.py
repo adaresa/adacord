@@ -1,9 +1,11 @@
 import logging
 import asyncio
+import re
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
+import aiohttp
 import discord
 import wavelink
 
@@ -31,7 +33,7 @@ from adacord.recommendations import (
     recommendations_for_player,
     resolve_recommendation_value,
 )
-from adacord.state import GuildState, get_guild_state
+from adacord.state import GuildState, get_guild_state, guild_states
 from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, queue_track_request
 from adacord.utils import format_duration, track_display_title, track_log_label, track_requester
 
@@ -57,11 +59,15 @@ PLAYER_ACCENTS = {
     "playing": 0x22C55E,
     "paused": 0xEAB308,
 }
-DISPLAY_REFRESH_INTERVAL = 5.0
+DISPLAY_REFRESH_INTERVAL = 15.0
 IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
+MAX_DISPLAY_REFRESH_BACKOFF = 2
+DISPLAY_BACKOFF_RECOVERY_EDITS = 20
+DISPLAY_COOLDOWN_SLACK = 1.0
 DISPLAY_LOOKUP_HISTORY_LIMIT = 50
 DISPLAY_EDIT_RETRIES = 3
 DISPLAY_EDIT_RETRY_DELAY = 0.5
+DISPLAY_EDIT_PATH = re.compile(r"/channels/\d+/messages/(\d+)$")
 
 
 async def refresh_display_with_recommendations(guild_id: int, player: wavelink.Player) -> None:
@@ -945,7 +951,7 @@ async def edit_display_message(
             if is_missing_message_error(exc):
                 return None, "missing"
             if is_rate_limited_error(exc):
-                record_display_rate_limit(guild_id, retry_after_seconds(exc))
+                record_display_rate_limit(guild_id, retry_after_seconds(getattr(exc, "response", None)))
             if attempt < DISPLAY_EDIT_RETRIES - 1:
                 await asyncio.sleep(DISPLAY_EDIT_RETRY_DELAY)
                 continue
@@ -953,6 +959,72 @@ async def edit_display_message(
             return None, "transient"
 
     return None, "transient"
+
+
+async def edit_progress_message(
+    guild_id: int,
+    message: discord.Message,
+    view: PlayerPanelView,
+) -> tuple[discord.Message | None, str]:
+    # Its own task so the rate limit trace can drop the edit without cancelling the refresh loop.
+    state = get_guild_state(guild_id)
+    edit = asyncio.create_task(edit_display_message(guild_id, message, view))
+    state.display_progress_edit = edit
+    try:
+        await asyncio.wait({edit})
+    except asyncio.CancelledError:
+        edit.cancel()
+        raise
+    finally:
+        state.display_progress_edit = None
+
+    if edit.cancelled():
+        return None, "transient"
+    edited, status = edit.result()
+    if status == "edited":
+        record_clean_progress_edit(guild_id)
+    return edited, status
+
+
+async def handle_discord_request_end(
+    session: aiohttp.ClientSession,
+    context: object,
+    params: aiohttp.TraceRequestEndParams,
+) -> None:
+    if params.method != "PATCH" or params.response.status != 429:
+        return
+    match = DISPLAY_EDIT_PATH.search(params.url.path)
+    if not match:
+        return
+    message_id = int(match.group(1))
+    for guild_id, state in guild_states.items():
+        if display_message_matches(state, message_id):
+            handle_display_edit_rate_limit(guild_id, params.response)
+            return
+
+
+def display_rate_limit_trace() -> aiohttp.TraceConfig:
+    # discord.py sleeps through 429s and retries, so message.edit() never reports them.
+    trace = aiohttp.TraceConfig()
+    trace.on_request_end.append(handle_discord_request_end)
+    return trace
+
+
+def handle_display_edit_rate_limit(guild_id: int, response: aiohttp.ClientResponse) -> None:
+    state = get_guild_state(guild_id)
+    record_display_rate_limit(guild_id, retry_after_seconds(response))
+    logger.info(
+        "Display edit rate limited (scope %s, retry after %s); progress edits now every %.0fs",
+        response.headers.get("X-RateLimit-Scope"),
+        response.headers.get("Retry-After"),
+        active_display_refresh_interval(state),
+    )
+
+    # A progress edit is stale by the time it could retry, so drop it and free the display lock.
+    # discord.py only reopens its global limit after the sleep, so cancelling that sleep would hang every request.
+    edit = state.display_progress_edit
+    if edit and not edit.done() and not response.headers.get("X-RateLimit-Global"):
+        edit.cancel()
 
 
 def should_refresh_progress(player: wavelink.Player | None) -> bool:
@@ -963,12 +1035,17 @@ def should_maintain_display(player: wavelink.Player | None) -> bool:
     return bool(player and getattr(player, "connected", True))
 
 
-def display_refresh_interval(player: wavelink.Player | None) -> float:
-    return DISPLAY_REFRESH_INTERVAL if should_refresh_progress(player) else IDLE_DISPLAY_REFRESH_INTERVAL
+def active_display_refresh_interval(state: GuildState) -> float:
+    return DISPLAY_REFRESH_INTERVAL * 2**state.display_refresh_backoff
 
 
-def retry_after_seconds(exc: discord.HTTPException) -> float | None:
-    response = getattr(exc, "response", None)
+def display_refresh_interval(guild_id: int, player: wavelink.Player | None) -> float:
+    if should_refresh_progress(player):
+        return active_display_refresh_interval(get_guild_state(guild_id))
+    return IDLE_DISPLAY_REFRESH_INTERVAL
+
+
+def retry_after_seconds(response: object | None) -> float | None:
     headers = getattr(response, "headers", None)
     value = headers.get("Retry-After") if headers else None
     try:
@@ -982,11 +1059,24 @@ def is_rate_limited_error(exc: discord.HTTPException) -> bool:
 
 
 def record_display_rate_limit(guild_id: int, retry_after: float | None) -> None:
-    if retry_after is None:
-        return
     state = get_guild_state(guild_id)
-    loop = asyncio.get_running_loop()
-    state.display_rate_limit_until = max(state.display_rate_limit_until, loop.time() + retry_after)
+    now = asyncio.get_running_loop().time()
+    # Several 429s inside one limit window are a single signal to slow down.
+    if now >= state.display_rate_limit_until:
+        state.display_refresh_backoff = min(state.display_refresh_backoff + 1, MAX_DISPLAY_REFRESH_BACKOFF)
+    state.display_clean_progress_edits = 0
+    if retry_after is not None:
+        state.display_rate_limit_until = max(state.display_rate_limit_until, now + retry_after)
+
+
+def record_clean_progress_edit(guild_id: int) -> None:
+    state = get_guild_state(guild_id)
+    if not state.display_refresh_backoff:
+        return
+    state.display_clean_progress_edits += 1
+    if state.display_clean_progress_edits >= DISPLAY_BACKOFF_RECOVERY_EDITS:
+        state.display_refresh_backoff -= 1
+        state.display_clean_progress_edits = 0
 
 
 def record_display_edit(guild_id: int) -> None:
@@ -1004,12 +1094,12 @@ def display_auto_refresh_cooldown(guild_id: int) -> float:
     except RuntimeError:
         return 0.0
     rate_limit_delay = state.display_rate_limit_until - now
-    edit_reserve_delay = (state.display_last_edit_at + DISPLAY_REFRESH_INTERVAL) - now
+    edit_reserve_delay = (state.display_last_edit_at + active_display_refresh_interval(state)) - now
     return max(rate_limit_delay, edit_reserve_delay, 0.0)
 
 
 def display_refresh_delay(guild_id: int, player: wavelink.Player | None) -> float:
-    return max(display_refresh_interval(player), display_auto_refresh_cooldown(guild_id))
+    return max(display_refresh_interval(guild_id, player), display_auto_refresh_cooldown(guild_id))
 
 
 def stop_display_refresh(guild_id: int) -> None:
@@ -1052,6 +1142,7 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
                 state.display_channel,
                 player,
                 manage_refresh=False,
+                progress=True,
             )
     except Exception:
         logger.exception("Failed to refresh player progress display")
@@ -1083,12 +1174,22 @@ async def create_or_update_display(
     player: wavelink.Player | None,
     *,
     manage_refresh: bool = True,
+    progress: bool = False,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
     if manage_refresh:
         await load_display_suggestions(player, allow_refresh=True)
     async with state.display_lock:
-        return await _create_or_update_display_locked(guild_id, channel, player, manage_refresh=manage_refresh)
+        # Another update may have spent the edit budget while this waited for the lock.
+        if progress and display_auto_refresh_cooldown(guild_id) > DISPLAY_COOLDOWN_SLACK:
+            return None
+        return await _create_or_update_display_locked(
+            guild_id,
+            channel,
+            player,
+            manage_refresh=manage_refresh,
+            progress=progress,
+        )
 
 
 async def _create_or_update_display_locked(
@@ -1097,6 +1198,7 @@ async def _create_or_update_display_locked(
     player: wavelink.Player | None,
     *,
     manage_refresh: bool = True,
+    progress: bool = False,
 ) -> discord.Message | None:
     state = get_guild_state(guild_id)
     # Suggestion searches can take seconds, so callers fill the cache before taking the
@@ -1116,7 +1218,8 @@ async def _create_or_update_display_locked(
                 break
 
             if display_message_uses_v2(message):
-                edited, status = await edit_display_message(guild_id, message, view)
+                edit = edit_progress_message if progress else edit_display_message
+                edited, status = await edit(guild_id, message, view)
                 if status == "edited" and edited:
                     record_display_edit(guild_id)
                     state.display_message = edited
