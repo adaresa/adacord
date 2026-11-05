@@ -1,6 +1,5 @@
 import logging
 import asyncio
-import time
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
@@ -8,7 +7,7 @@ from typing import Mapping
 import discord
 import wavelink
 
-from adacord.persistence import save_player_state
+from adacord.persistence import clear_guild_state, playback_position, save_player_state, saved_playback_for_guild
 from adacord.config import default_volume
 from adacord.player import (
     MissingVoicePermissions,
@@ -16,6 +15,7 @@ from adacord.player import (
     clear_player,
     ensure_player,
     get_player,
+    lavalink_voice_connected,
     play_next,
     queue_items,
     reconnect_player_voice,
@@ -33,7 +33,7 @@ from adacord.recommendations import (
 )
 from adacord.state import GuildState, get_guild_state
 from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, queue_track_request
-from adacord.utils import format_duration, track_display_title, track_requester
+from adacord.utils import format_duration, track_display_title, track_log_label, track_requester
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,6 @@ IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
 DISPLAY_LOOKUP_HISTORY_LIMIT = 50
 DISPLAY_EDIT_RETRIES = 3
 DISPLAY_EDIT_RETRY_DELAY = 0.5
-LONG_PAUSE_VOICE_RECONNECT_SECONDS = 10 * 60
 
 
 async def refresh_display_with_recommendations(guild_id: int, player: wavelink.Player) -> None:
@@ -86,12 +85,6 @@ def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player 
     if not interaction.guild:
         return None
     return get_player(interaction.guild)
-
-
-def should_reconnect_voice_after_pause(state: GuildState) -> bool:
-    if state.paused_at is None:
-        return False
-    return time.monotonic() - state.paused_at >= LONG_PAUSE_VOICE_RECONNECT_SECONDS
 
 
 def user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | discord.StageChannel | None:
@@ -185,6 +178,45 @@ async def connect_for_interaction(interaction: discord.Interaction) -> wavelink.
     return player
 
 
+async def resume_saved_playback(interaction: discord.Interaction) -> bool:
+    # A failed voice refresh or startup restore leaves the queue on disk without a player.
+    guild = interaction.guild
+    saved = saved_playback_for_guild(guild.id) if guild else None
+    if not saved:
+        return False
+
+    # recovery imports this module for the display helpers.
+    from adacord.recovery import restore_guild_playback_state
+
+    await acknowledge(interaction)
+    state = get_guild_state(guild.id)
+    state.voice_refresh_in_progress = True
+    try:
+        await restore_guild_playback_state(interaction.client, guild.id, {**saved, "paused": False})
+    except Exception:
+        logger.exception("Failed to restore saved playback for guild %s", guild.id)
+    finally:
+        state.voice_refresh_in_progress = False
+
+    if get_player(guild):
+        logger.info("%s resumed saved playback in guild %s", interaction.user, guild.id)
+    else:
+        await respond(
+            interaction,
+            "Could not rejoin voice. Your queue is saved, so press Resume to try again.",
+            ephemeral=True,
+        )
+    return True
+
+
+async def dismiss_saved_playback(guild_id: int) -> bool:
+    if not saved_playback_for_guild(guild_id):
+        return False
+    await clear_guild_state(guild_id)
+    await update_display_for_guild(guild_id, None)
+    return True
+
+
 @dataclass(frozen=True)
 class PlayerPanelModel:
     state: str
@@ -219,7 +251,7 @@ def build_progress_text(player: wavelink.Player | None) -> str:
         return "No active track"
 
     duration = format_duration(getattr(current, "length", None))
-    position = format_duration(getattr(player, "position", None))
+    position = format_duration(playback_position(player))
     if duration and position:
         return f"{position} / {duration}"
     if duration:
@@ -303,6 +335,22 @@ class PlayerPanelView(discord.ui.LayoutView):
 
     def guild_id_for(self, interaction: discord.Interaction) -> int:
         return interaction.guild_id or self.guild_id or 0
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # The voice client is briefly gone during a refresh, so controls would report nothing playing.
+        if not get_guild_state(self.guild_id_for(interaction)).voice_refresh_in_progress:
+            return True
+        await respond(interaction, "Reconnecting to voice, try again in a few seconds.", ephemeral=True)
+        return False
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item,
+    ) -> None:
+        logger.error("Player control %s failed", getattr(item, "custom_id", item), exc_info=error)
+        await respond(interaction, f"That didn't work: {error}", ephemeral=True)
 
     async def refresh(self, interaction: discord.Interaction) -> None:
         player = player_for_interaction(interaction)
@@ -446,11 +494,14 @@ class PlayerPanelView(discord.ui.LayoutView):
             await respond(interaction, "Nothing to restart.", ephemeral=True)
             return
         await player.seek(0)
+        get_guild_state(player.guild.id).restored_position = None
         await save_player_state(player)
         await acknowledge(interaction)
 
     async def pause_resume(self, interaction: discord.Interaction) -> None:
         player = player_for_interaction(interaction)
+        if not player and await resume_saved_playback(interaction):
+            return
         if not player or (not player.current and player.queue.is_empty):
             await respond(interaction, "Nothing to pause or resume.", ephemeral=True)
             return
@@ -461,25 +512,37 @@ class PlayerPanelView(discord.ui.LayoutView):
             await self.refresh(interaction)
             return
         should_pause = not player.paused
-        state = get_guild_state(player.guild.id)
         await acknowledge(interaction)
+        logger.info(
+            "%s %s playback in guild %s: track=%s position=%s",
+            interaction.user,
+            "paused" if should_pause else "resumed",
+            player.guild.id,
+            track_log_label(player.current),
+            playback_position(player),
+        )
         if should_pause:
-            state.paused_at = time.monotonic()
             await player.pause(True)
-        elif should_reconnect_voice_after_pause(state):
+        else:
             try:
-                player = await reconnect_player_voice(player)
+                if await lavalink_voice_connected(player):
+                    await player.pause(False)
+                else:
+                    await respond(interaction, "Voice dropped while paused, reconnecting...", ephemeral=True)
+                    player = await reconnect_player_voice(player)
+                    # The running refresh loop belongs to the retired player; the refresh below starts a new one.
+                    stop_display_refresh(player.guild.id)
             except MissingVoicePermissions as exc:
                 await respond(interaction, str(exc), ephemeral=True)
                 return
             except Exception as exc:
-                logger.exception("Failed to refresh stale voice session before resume")
-                await respond(interaction, f"Could not refresh voice before resuming: {exc}", ephemeral=True)
+                logger.exception("Failed to resume playback in guild %s", player.guild.id)
+                await respond(
+                    interaction,
+                    f"Could not resume: {exc} Your queue is saved, so press Resume to try again.",
+                    ephemeral=True,
+                )
                 return
-            state.paused_at = None
-        else:
-            state.paused_at = None
-            await player.pause(False)
         await save_player_state(player)
         await self.refresh(interaction)
 
@@ -494,7 +557,10 @@ class PlayerPanelView(discord.ui.LayoutView):
     async def stop(self, interaction: discord.Interaction) -> None:
         player = player_for_interaction(interaction)
         if not player:
-            await respond(interaction, "Not connected.", ephemeral=True)
+            if await dismiss_saved_playback(self.guild_id_for(interaction)):
+                await acknowledge(interaction)
+            else:
+                await respond(interaction, "Not connected.", ephemeral=True)
             return
         await clear_player(player)
         await acknowledge(interaction)

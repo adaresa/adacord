@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from adacord import commands, ui
+from adacord import commands, persistence, ui
 from adacord.sources import LoadSummary
 from adacord.track_requests import TrackRequestResult
 from conftest import (
@@ -193,6 +193,28 @@ async def test_play_reports_request_failure_and_clears_deferred_response(monkeyp
     assert last_response_text(interaction) == expected
     assert interaction.followup.sent[-1]["kwargs"]["ephemeral"] is True
     assert interaction.deleted_original_response is True
+
+
+async def test_disconnect_without_player_dismisses_saved_session(monkeypatch) -> None:
+    guild = FakeGuild()
+    persistence.save_guild_snapshot(
+        guild.id,
+        {"voice_channel_id": 456, "current": persistence.track_payload(FakeTrack("Current")), "queue": []},
+    )
+    updates = []
+
+    async def fake_update(guild_id, player):
+        updates.append((guild_id, player))
+
+    monkeypatch.setattr(commands, "player_for_interaction", lambda interaction: None)
+    monkeypatch.setattr(ui, "update_display_for_guild", fake_update)
+    interaction = FakeInteraction(guild=guild)
+
+    await commands.disconnect_impl(interaction)
+
+    assert persistence.saved_playback_for_guild(guild.id) is None
+    assert updates == [(guild.id, None)]
+    assert_no_text_response(interaction)
 
 
 async def test_empty_state_commands_respond_ephemerally(monkeypatch) -> None:

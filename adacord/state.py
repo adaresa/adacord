@@ -21,7 +21,7 @@ class GuildState:
     display_refresh_task: asyncio.Task[None] | None = None
     display_rate_limit_until: float = 0.0
     display_last_edit_at: float = 0.0
-    paused_at: float | None = None
+    restored_position: int | None = None
     voice_refresh_in_progress: bool = False
     voice_reconnect_task: asyncio.Task[None] | None = None
 

@@ -83,7 +83,7 @@ async def test_restore_guild_playback_state_reconnects_and_restores_player(monke
     assert player.current.title == "Current"
     assert list(player.queue)[0].title == "Queued"
     assert player.paused is True
-    assert state.paused_at is not None
+    assert state.restored_position == 30_000
     assert player.play_kwargs[-1]["start"] == 30_000
     assert updates == [(guild.id, player)]
     # FakePlayer, like Wavelink before its first position update, still reports zero.

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import wavelink
 
-from adacord import events
+from adacord import events, persistence
 from adacord.persistence import track_payload
 from adacord.state import get_guild_state
 from conftest import FakeBot, FakeGuild, FakePlayer, FakeQueue, FakeTrack
@@ -74,7 +74,7 @@ async def test_reconnect_saved_voice_playback_retries_and_preserves_state(monkey
 async def test_bot_voice_disconnect_without_saved_music_does_not_reconnect(monkeypatch, captured_tasks) -> None:
     guild = FakeGuild()
 
-    monkeypatch.setattr(events, "load_state", lambda: {"version": 1, "guilds": {}})
+    monkeypatch.setattr(persistence, "load_state", lambda: {"version": 1, "guilds": {}})
 
     await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id)
 
@@ -97,7 +97,7 @@ async def test_bot_voice_disconnect_schedules_reconnect_when_saved_music_exists(
     guild = FakeGuild()
     saved = {"voice_channel_id": 456, "current": track_payload(FakeTrack("Current")), "queue": []}
 
-    monkeypatch.setattr(events, "load_state", lambda: {"version": 1, "guilds": {str(guild.id): saved}})
+    monkeypatch.setattr(persistence, "load_state", lambda: {"version": 1, "guilds": {str(guild.id): saved}})
 
     await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id, FakePlayer(guild=guild))
 
@@ -116,7 +116,7 @@ async def test_bot_voice_disconnect_saves_live_position_before_reconnect(monkeyp
         saves.append(seen_player.position)
 
     monkeypatch.setattr(events, "save_player_state", fake_save)
-    monkeypatch.setattr(events, "load_state", lambda: {"version": 1, "guilds": {str(guild.id): saved}})
+    monkeypatch.setattr(persistence, "load_state", lambda: {"version": 1, "guilds": {str(guild.id): saved}})
 
     await events.handle_bot_voice_disconnect(FakeBot(guild), guild.id, player)
 
@@ -145,7 +145,7 @@ async def test_server_disconnect_does_not_resurrect_saved_music(monkeypatch) -> 
     async def update(guild_id, player):
         calls.append(("update", guild_id, player))
 
-    monkeypatch.setattr(events, "load_state", lambda: {"guilds": {str(guild.id): saved}})
+    monkeypatch.setattr(persistence, "load_state", lambda: {"guilds": {str(guild.id): saved}})
     monkeypatch.setattr(events, "clear_saved_guild_state", clear)
     monkeypatch.setattr(events, "update_display_for_guild", update)
 

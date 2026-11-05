@@ -7,8 +7,9 @@ import wavelink
 
 from adacord.persistence import (
     clear_guild_state as clear_saved_guild_state,
-    load_state,
+    playback_position,
     save_player_state,
+    saved_playback_for_guild,
 )
 from adacord.player import get_player, has_next_track, play_next
 from adacord.recovery import restore_guild_playback_state
@@ -23,25 +24,6 @@ NON_ADVANCING_TRACK_END_REASONS = {"loadfailed", "replaced"}
 RECOVERY_REQUESTER = "playback recovery"
 RECOVERY_ATTEMPTED_EXTRA = "playback_recovery_attempted"
 VOICE_RECONNECT_ATTEMPT_DELAYS = (0.0, 1.0, 3.0)
-
-
-def saved_playback_has_music(saved: dict[str, Any]) -> bool:
-    current = saved.get("current")
-    queue = saved.get("queue")
-    return isinstance(current, dict) or bool(queue if isinstance(queue, list) else [])
-
-
-def saved_playback_for_guild(guild_id: int) -> dict[str, Any] | None:
-    data = load_state()
-    guilds = data.get("guilds")
-    if not isinstance(guilds, dict):
-        return None
-    saved = guilds.get(str(guild_id))
-    if not isinstance(saved, dict):
-        return None
-    if not isinstance(saved.get("voice_channel_id"), int) or not saved_playback_has_music(saved):
-        return None
-    return saved
 
 
 async def reconnect_saved_voice_playback(bot: commands.Bot, guild_id: int, saved: dict[str, Any]) -> None:
@@ -365,7 +347,7 @@ async def handle_track_exception(payload: wavelink.TrackExceptionEventPayload) -
         return
 
     failed_track = getattr(payload, "track", None) or player.current
-    position = max(0, int(getattr(player, "position", 0) or 0))
+    position = playback_position(player)
     logger.warning(
         "Lavalink track exception in guild %s: track=%s queue=%s position=%s paused=%s exception=%s",
         player.guild.id,
@@ -390,7 +372,7 @@ async def handle_track_stuck(payload: wavelink.TrackStuckEventPayload) -> None:
         return
 
     failed_track = getattr(payload, "track", None) or player.current
-    position = max(0, int(getattr(player, "position", 0) or 0))
+    position = playback_position(player)
     logger.warning(
         "Lavalink track stuck in guild %s after threshold %s: track=%s queue=%s position=%s paused=%s",
         player.guild.id,
