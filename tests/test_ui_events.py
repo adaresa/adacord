@@ -749,13 +749,9 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
     state.display_channel = FakeTextChannel()
     calls = []
     delays = []
-    saves = []
 
     async def fake_sleep(delay):
         delays.append(delay)
-
-    async def fake_save(seen_player):
-        saves.append(seen_player)
 
     async def fake_create_or_update(guild_id, channel, seen_player, *, manage_refresh=True, progress=False):
         calls.append((guild_id, channel, seen_player, manage_refresh, progress))
@@ -765,7 +761,6 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
             seen_player.connected = False
 
     monkeypatch.setattr(ui.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(ui, "save_player_state", fake_save)
     monkeypatch.setattr(ui, "create_or_update_display", fake_create_or_update)
 
     await ui.refresh_display_progress(player.guild.id, player)
@@ -775,7 +770,64 @@ async def test_display_refresh_loop_uses_active_then_idle_intervals(monkeypatch)
         (player.guild.id, state.display_channel, player, False, True),
         (player.guild.id, state.display_channel, player, False, True),
     ]
-    assert saves == [player]
+
+
+async def test_playback_saves_continue_during_display_backoff_and_stop_with_the_loop(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True)
+    state = get_guild_state(player.guild.id)
+    state.display_channel = FakeTextChannel()
+    state.display_refresh_backoff = ui.MAX_DISPLAY_REFRESH_BACKOFF
+    saves = []
+    saved_enough = asyncio.Event()
+
+    async def fake_save(seen_player):
+        saves.append(seen_player)
+        if len(saves) >= 3:
+            saved_enough.set()
+
+    async def unexpected_update(*args, **kwargs):
+        raise AssertionError("the panel interval has not elapsed")
+
+    monkeypatch.setattr(ui, "PLAYBACK_SAVE_INTERVAL", 0.01)
+    monkeypatch.setattr(ui, "save_player_state", fake_save)
+    monkeypatch.setattr(ui, "create_or_update_display", unexpected_update)
+
+    loop_task = asyncio.create_task(ui.refresh_display_progress(player.guild.id, player))
+    await asyncio.wait_for(saved_enough.wait(), timeout=5)
+    assert not loop_task.done()
+
+    loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
+    saves_at_stop = len(saves)
+    await asyncio.sleep(0.05)
+
+    assert len(saves) == saves_at_stop
+
+
+async def test_playback_saves_skip_paused_player_and_survive_failures(monkeypatch) -> None:
+    player = FakePlayer(current=FakeTrack("Current"), playing=True, paused=True)
+    saves = []
+    saved_after_failure = asyncio.Event()
+
+    async def flaky_save(seen_player):
+        saves.append(seen_player)
+        if len(saves) == 1:
+            raise RuntimeError("disk trouble")
+        saved_after_failure.set()
+
+    monkeypatch.setattr(ui, "PLAYBACK_SAVE_INTERVAL", 0.01)
+    monkeypatch.setattr(ui, "save_player_state", flaky_save)
+
+    save_task = asyncio.create_task(ui.save_playback_progress(player))
+    await asyncio.sleep(0.05)
+    assert saves == []
+
+    player.paused = False
+    await asyncio.wait_for(saved_after_failure.wait(), timeout=5)
+    assert len(saves) == 2
+
+    save_task.cancel()
+    await asyncio.gather(save_task, return_exceptions=True)
 
 
 async def test_successful_display_edit_delays_automatic_refresh_budget() -> None:

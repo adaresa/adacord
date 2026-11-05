@@ -64,6 +64,7 @@ IDLE_DISPLAY_REFRESH_INTERVAL = 60.0
 MAX_DISPLAY_REFRESH_BACKOFF = 2
 DISPLAY_BACKOFF_RECOVERY_EDITS = 20
 DISPLAY_COOLDOWN_SLACK = 1.0
+PLAYBACK_SAVE_INTERVAL = 5.0
 DISPLAY_LOOKUP_HISTORY_LIMIT = 50
 DISPLAY_EDIT_RETRIES = 3
 DISPLAY_EDIT_RETRY_DELAY = 0.5
@@ -1122,7 +1123,20 @@ def ensure_display_refresh(guild_id: int, player: wavelink.Player | None) -> Non
     state.display_refresh_task = asyncio.create_task(refresh_display_progress(guild_id, player))
 
 
+async def save_playback_progress(player: wavelink.Player) -> None:
+    # Separate from panel edits so rate limit backoff can't age the position used for crash recovery.
+    while True:
+        await asyncio.sleep(PLAYBACK_SAVE_INTERVAL)
+        if not should_refresh_progress(player):
+            continue
+        try:
+            await save_player_state(player)
+        except Exception:
+            logger.exception("Failed to save playback progress")
+
+
 async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> None:
+    save_task = asyncio.create_task(save_playback_progress(player))
     try:
         while should_maintain_display(player):
             await asyncio.sleep(display_refresh_delay(guild_id, player))
@@ -1135,8 +1149,6 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
                 state = get_guild_state(guild_id)
                 if not state.display_channel or not should_maintain_display(player):
                     break
-            if should_refresh_progress(player):
-                await save_player_state(player)
             await create_or_update_display(
                 guild_id,
                 state.display_channel,
@@ -1147,6 +1159,7 @@ async def refresh_display_progress(guild_id: int, player: wavelink.Player) -> No
     except Exception:
         logger.exception("Failed to refresh player progress display")
     finally:
+        save_task.cancel()
         state = get_guild_state(guild_id)
         try:
             current_task = asyncio.current_task()
