@@ -16,21 +16,6 @@ def clear_recommendation_cache():
     recommendations.clear_recommendation_cache()
 
 
-def test_recommendation_queries_use_youtube_music_fallbacks() -> None:
-    current = FakeTrack("One More Time", author="Daft Punk")
-    current.isrc = "GBDUW0000053"
-    current.uri = "https://open.spotify.com/track/abc123?si=token"
-    current.source = "spotify"
-    player = FakePlayer(current=current, queue=FakeQueue([FakeTrack("Digital Love", author="Daft Punk")]))
-
-    queries = recommendations.recommendation_queries(player)
-
-    assert "ytmsearch:Daft Punk radio" in queries
-    assert "ytmsearch:Daft Punk - Digital Love radio" in queries
-    assert "ytmsearch:Daft Punk similar artists songs" in queries
-    assert "ytmsearch:Daft Punk - One More Time similar songs" in queries
-    assert any("Digital Love" in query for query in queries)
-
 
 def test_rank_recommendations_deduplicates_current_queue_and_candidates() -> None:
     current = FakeTrack("Current", author="Artist")
@@ -129,31 +114,6 @@ async def test_recommendations_skip_load_when_refresh_not_allowed(monkeypatch) -
 
     assert await recommendations.recommendations_for_player(player, allow_refresh=False) == ()
 
-
-async def test_recommendation_searches_run_concurrently_with_a_cap(monkeypatch) -> None:
-    queued = [FakeTrack(f"Queued {index}", author=f"Band {index}") for index in range(3)]
-    player = FakePlayer(current=FakeTrack("Current", author="Artist"), queue=FakeQueue(queued))
-    queries = recommendations.recommendation_queries(player)
-    in_flight = 0
-    max_in_flight = 0
-
-    async def fake_search(query, requester, *, limit=None):
-        nonlocal in_flight, max_in_flight
-        in_flight += 1
-        max_in_flight = max(max_in_flight, in_flight)
-        await asyncio.sleep(0)
-        in_flight -= 1
-        if query == queries[1]:
-            raise RuntimeError("search failed")
-        return [FakeTrack(query)]
-
-    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
-
-    candidates = await recommendations.load_recommendation_candidates(player)
-
-    assert len(queries) > recommendations.RECOMMENDATION_SEARCH_CONCURRENCY
-    assert max_in_flight == recommendations.RECOMMENDATION_SEARCH_CONCURRENCY
-    assert [track.title for track in candidates] == [query for query in queries if query != queries[1]]
 
 
 async def test_recommendations_return_stale_cache_when_refresh_not_allowed(monkeypatch) -> None:
@@ -262,24 +222,6 @@ async def test_recommendations_refresh_after_cache_expiry(monkeypatch) -> None:
     assert second[0].track.title == "Suggestion 2"
 
 
-async def test_load_recommendation_candidates_continues_after_query_failure(monkeypatch) -> None:
-    player = FakePlayer(current=FakeTrack("Current", author="Artist"))
-    found = FakeTrack("Found", author="Artist")
-    calls = []
-
-    async def fake_search(query, requester, *, limit=None):
-        calls.append(query)
-        if len(calls) == 1:
-            raise RuntimeError("source unavailable")
-        return [found]
-
-    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
-
-    candidates = await recommendations.load_recommendation_candidates(player)
-
-    assert found in candidates
-    assert len(calls) > 1
-
 
 async def test_resolve_recommendation_value_uses_lavalink_search(monkeypatch) -> None:
     resolved = FakeTrack("Resolved", author="Artist")
@@ -293,3 +235,188 @@ async def test_resolve_recommendation_value_uses_lavalink_search(monkeypatch) ->
     monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
 
     assert await recommendations.resolve_recommendation_value(resolved.uri, "tester") is resolved
+
+
+def yt_track(title: str, author: str, video_id: str, **kwargs) -> FakeTrack:
+    track = FakeTrack(title, author=author, source="youtube", **kwargs)
+    track.identifier = video_id
+    track.uri = f"https://www.youtube.com/watch?v={video_id}"
+    track.raw_data["info"].update(identifier=video_id, uri=track.uri, sourceName="youtube")
+    return track
+
+
+def fake_radios(monkeypatch, radios: dict[str, list[FakeTrack]], searches: dict[str, list[FakeTrack]] | None = None):
+    calls: list[str] = []
+
+    async def fake_search(query, requester, *, limit=None):
+        calls.append(query)
+        for video_id, tracks in radios.items():
+            if query == recommendations.radio_url(video_id):
+                return list(tracks)
+        if searches and query in searches:
+            return list(searches[query])[:limit]
+        raise RuntimeError(f"unexpected query {query}")
+
+    monkeypatch.setattr(recommendations, "search_lavalink", fake_search)
+    return calls
+
+
+def test_radio_url_uses_youtube_music_radio() -> None:
+    assert recommendations.radio_url("FGBhQbmPwH8") == (
+        "https://music.youtube.com/watch?v=FGBhQbmPwH8&list=RDAMVMFGBhQbmPwH8"
+    )
+
+
+async def test_suggestions_come_from_the_current_songs_radio(monkeypatch) -> None:
+    current = yt_track("Daft Punk - One More Time (Official Video)", "Daft Punk", "FGBhQbmPwH8")
+    radio = [
+        current,
+        yt_track("Daft Punk - Around The World", "Daft Punk", "K0HSD_i2DvA"),
+        yt_track("Stardust - Music Sounds Better With You", "Stardust", "FQlAEiCb8m0"),
+        yt_track("Kylie Minogue - Can't Get You Out Of My Head", "Kylie Minogue", "c18441Eh_WE"),
+    ]
+    fake_radios(monkeypatch, {"FGBhQbmPwH8": radio})
+    player = FakePlayer(current=current)
+
+    suggestions = await recommendations.recommendations_for_player(player)
+
+    # The current artist only fills a slot once other artists run out.
+    assert [item.track.author for item in suggestions] == ["Stardust", "Kylie Minogue", "Daft Punk"]
+    assert suggestions[0].label == "Stardust - Music Sounds Better With You"
+
+
+async def test_suggestions_skip_played_queued_and_reuploaded_songs(monkeypatch) -> None:
+    current = yt_track("One More Time", "Daft Punk", "FGBhQbmPwH8")
+    played = yt_track("Bob Sinclar - World Hold On (Official HD Video)", "Bob Sinclar", "XpdpW0z9xnQ")
+    queued = yt_track("Kylie Minogue - Can't Get You Out Of My Head", "Kylie Minogue", "c18441Eh_WE")
+    radio = [
+        yt_track("Daft Punk - One More Time (Lyrics)", "PitchPerfect Channel", "hVrVPBLqGfQ"),
+        yt_track("Bob Sinclar - World Hold On (Lyrics)", "Some Lyrics Channel", "aaaaaaaaaaa"),
+        yt_track("Kylie Minogue - Can't Get You Out Of My Head (Official Video)", "Kylie Minogue", "bbbbbbbbbbb"),
+        yt_track("Stardust - Music Sounds Better With You", "Stardust", "FQlAEiCb8m0"),
+    ]
+    fake_radios(monkeypatch, {"FGBhQbmPwH8": radio, "c18441Eh_WE": []})
+    player = FakePlayer(current=current, queue=FakeQueue([queued]))
+    player.queue.history.append(played)
+
+    suggestions = await recommendations.recommendations_for_player(player)
+
+    assert [item.track.identifier for item in suggestions] == ["FQlAEiCb8m0"]
+
+
+async def test_suggestions_put_remixes_and_live_versions_last(monkeypatch) -> None:
+    current = yt_track("One More Time", "Daft Punk", "FGBhQbmPwH8")
+    remix = yt_track("Gala - Freed From Desire (Progressive House Remix)", "H2Beats", "u-D_zYjm2U8")
+    original = yt_track("Alice Deejay - Better Off Alone (Official Video)", "Alice Deejay", "Lgs9QUtWc3M")
+    fake_radios(monkeypatch, {"FGBhQbmPwH8": [remix, original]})
+
+    suggestions = await recommendations.recommendations_for_player(FakePlayer(current=current))
+
+    assert [item.track for item in suggestions] == [original, remix]
+
+
+async def test_suggestions_blend_queue_radios_behind_the_current_song(monkeypatch) -> None:
+    current = yt_track("Current", "Artist A", "AAAAAAAAAAA")
+    queued = yt_track("Queued", "Artist B", "BBBBBBBBBBB")
+    current_radio = [yt_track(f"Current pick {i}", f"Current Artist {i}", f"c{i:010d}") for i in range(4)]
+    queue_radio = [yt_track(f"Queue pick {i}", f"Queue Artist {i}", f"q{i:010d}") for i in range(4)]
+    fake_radios(monkeypatch, {"AAAAAAAAAAA": current_radio, "BBBBBBBBBBB": queue_radio})
+
+    suggestions = await recommendations.recommendations_for_player(
+        FakePlayer(current=current, queue=FakeQueue([queued]))
+    )
+
+    assert [item.track.title for item in suggestions][:6] == [
+        "Current pick 0",
+        "Queue pick 0",
+        "Current pick 1",
+        "Current pick 2",
+        "Queue pick 1",
+        "Current pick 3",
+    ]
+
+
+async def test_failed_radio_seed_does_not_hide_other_suggestions(monkeypatch) -> None:
+    current = yt_track("Current", "Artist A", "AAAAAAAAAAA")
+    queued = yt_track("Queued", "Artist B", "BBBBBBBBBBB")
+    pick = yt_track("Pick", "Artist C", "CCCCCCCCCCC")
+    fake_radios(monkeypatch, {"BBBBBBBBBBB": [pick]})
+
+    suggestions = await recommendations.recommendations_for_player(
+        FakePlayer(current=current, queue=FakeQueue([queued]))
+    )
+
+    assert [item.track for item in suggestions] == [pick]
+
+
+async def test_non_youtube_seed_finds_a_youtube_video_first(monkeypatch) -> None:
+    current = FakeTrack("Song", author="SoundCloud Artist", source="soundcloud")
+    found = yt_track("SoundCloud Artist - Song", "SoundCloud Artist", "SSSSSSSSSSS")
+    pick = yt_track("Pick", "Artist C", "CCCCCCCCCCC")
+    calls = fake_radios(
+        monkeypatch,
+        {"SSSSSSSSSSS": [pick]},
+        searches={"ytsearch:SoundCloud Artist - Song": [found]},
+    )
+
+    suggestions = await recommendations.recommendations_for_player(FakePlayer(current=current))
+
+    assert calls[0] == "ytsearch:SoundCloud Artist - Song"
+    assert [item.track for item in suggestions] == [pick]
+
+
+async def test_radio_is_cached_per_video(monkeypatch) -> None:
+    calls = fake_radios(monkeypatch, {"AAAAAAAAAAA": [yt_track("Pick", "Artist", "CCCCCCCCCCC")]})
+
+    first = await recommendations.load_radio("AAAAAAAAAAA")
+    second = await recommendations.load_radio("AAAAAAAAAAA")
+
+    assert first == second
+    assert calls == [recommendations.radio_url("AAAAAAAAAAA")]
+
+
+async def test_autoplay_picks_a_fresh_song_by_a_different_artist(monkeypatch) -> None:
+    last = yt_track("Last", "Artist A", "AAAAAAAAAAA")
+    earlier = yt_track("Earlier", "Artist B", "BBBBBBBBBBB")
+    radio = [
+        last,
+        earlier,
+        yt_track("Another by A", "Artist A", "DDDDDDDDDDD"),
+        yt_track("Fresh", "Artist C", "CCCCCCCCCCC"),
+    ]
+    fake_radios(monkeypatch, {"AAAAAAAAAAA": radio})
+    player = FakePlayer()
+    player.queue.history.extend([earlier, last])
+
+    pick = await recommendations.autoplay_track(player, last)
+
+    assert pick is radio[3]
+
+
+async def test_autoplay_falls_back_to_the_same_artist_when_nothing_else_is_left(monkeypatch) -> None:
+    last = yt_track("Last", "Artist A", "AAAAAAAAAAA")
+    same_artist = yt_track("Another by A", "Artist A", "DDDDDDDDDDD")
+    fake_radios(monkeypatch, {"AAAAAAAAAAA": [last, same_artist]})
+
+    assert await recommendations.autoplay_track(FakePlayer(), last) is same_artist
+
+
+async def test_autoplay_vibe_seeds_from_a_search(monkeypatch) -> None:
+    vibe_seed = yt_track("French house classic", "Vibe Artist", "VVVVVVVVVVV")
+    pick = yt_track("Vibe pick", "Artist C", "CCCCCCCCCCC")
+    calls = fake_radios(
+        monkeypatch,
+        {"VVVVVVVVVVV": [vibe_seed, pick]},
+        searches={"ytsearch:90s french house": [vibe_seed]},
+    )
+
+    player = FakePlayer()
+    assert await recommendations.autoplay_track(player, None, vibe="90s french house") is vibe_seed
+    assert "ytsearch:90s french house" in calls
+
+    player.queue.history.append(vibe_seed)
+    assert await recommendations.autoplay_track(player, vibe_seed, vibe="90s french house") is pick
+
+
+async def test_autoplay_returns_none_without_seeds() -> None:
+    assert await recommendations.autoplay_track(FakePlayer(), None) is None

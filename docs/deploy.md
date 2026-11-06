@@ -59,7 +59,7 @@ The `.env` file and `./data` directory are untracked, so configuration and playb
 
 Lavalink configuration updates interrupt active audio, so schedule those releases between listening sessions. Ordinary bot updates leave Lavalink and the cipher running. Deployments do not prune shared Docker images.
 
-The YouTube plugin is pinned to upstream commit `f45bbb7aebfcbc1c553769e04af6cd43afa8b7c3`, which fixes premature EOF when YouTube omits the total content length ([upstream #235](https://github.com/lavalink-devs/youtube-source/pull/235)). Version 1.18.2 can stop valid tracks at the first byte-range boundary, including immediately after seeking. Before replacing this pin, verify actual decoding past that boundary and through the end of the track; a metadata lookup or short stream sample does not cover this failure.
+The YouTube plugin is pinned to upstream commit `2be8e542d3f6f178e048dca565892684c2e40177`. It includes the fix for premature EOF when YouTube omits the total content length ([upstream #235](https://github.com/lavalink-devs/youtube-source/pull/235)) and a fix that stops remote cipher requests from starving the plugin's HTTP connections ([upstream #245](https://github.com/lavalink-devs/youtube-source/pull/245)). Version 1.18.2 can stop valid tracks at the first byte-range boundary, including immediately after seeking. Before replacing this pin, verify actual decoding past that boundary and through the end of the track; a metadata lookup or short stream sample does not cover this failure.
 
 ## YouTube OAuth
 
