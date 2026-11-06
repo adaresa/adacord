@@ -14,6 +14,8 @@ class GuildState:
     display_channel_id: int | None = None
     display_message_id: int | None = None
     loop_mode: str = "none"
+    autoplay: bool = False
+    autoplay_vibe: str | None = None
     previous_volume: int = DEFAULT_VOLUME
     connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     advance_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

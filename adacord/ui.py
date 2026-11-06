@@ -9,6 +9,7 @@ import aiohttp
 import discord
 import wavelink
 
+from adacord.autoplay import autoplay_label, queue_autoplay_track, set_autoplay
 from adacord.persistence import clear_guild_state, playback_position, save_player_state, saved_playback_for_guild
 from adacord.config import default_volume
 from adacord.player import (
@@ -17,6 +18,7 @@ from adacord.player import (
     clear_player,
     ensure_player,
     get_player,
+    has_next_track,
     lavalink_voice_connected,
     play_next,
     queue_items,
@@ -50,6 +52,7 @@ PLAYER_CONTROL_IDS = {
     "shuffle": "adacord:player:shuffle",
     "loop": "adacord:player:loop",
     "queue": "adacord:player:queue",
+    "autoplay": "adacord:player:autoplay",
     "add": "adacord:player:add",
     "suggestions": "adacord:player:suggestions",
 }
@@ -86,6 +89,14 @@ def refresh_display_in_background(guild_id: int, player: wavelink.Player) -> Non
     task = asyncio.create_task(refresh_display_with_recommendations(guild_id, player))
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
+
+
+def last_played_track(player: wavelink.Player) -> wavelink.Playable | None:
+    history = getattr(player.queue, "history", None)
+    try:
+        return list(history)[-1] if history else None
+    except TypeError:
+        return None
 
 
 def player_for_interaction(interaction: discord.Interaction) -> wavelink.Player | None:
@@ -233,6 +244,7 @@ class PlayerPanelModel:
     artwork_url: str | None
     volume: int
     loop_mode: str
+    autoplay: str
     queue_count: int
     queue_preview: tuple[str, ...]
     suggestions: tuple[Recommendation, ...]
@@ -305,6 +317,7 @@ def build_player_panel_model(
         artwork_url=track_artwork_url(current),
         volume=volume,
         loop_mode=loop_mode,
+        autoplay=autoplay_label(guild_id) if guild_id is not None else "Off",
         queue_count=len(tracks),
         queue_preview=build_queue_preview(player),
         suggestions=suggestions,
@@ -321,6 +334,7 @@ def build_player_panel_model(
             "shuffle": not bool(tracks),
             "loop": not has_music,
             "queue": not bool(tracks),
+            "autoplay": not connected,
             "add": not connected,
         }),
     )
@@ -377,6 +391,7 @@ class PlayerPanelView(discord.ui.LayoutView):
         summary = [
             f"Volume: {self.model.volume}%",
             f"Loop: {self.model.loop_mode.title()}",
+            f"Autoplay: {self.model.autoplay}",
             f"Queue: {self.model.queue_count}",
         ]
 
@@ -396,7 +411,8 @@ class PlayerPanelView(discord.ui.LayoutView):
         container.add_item(add_row)
 
         container.add_item(discord.ui.Separator())
-        queue_text = "\n".join(self.model.queue_preview) if self.model.queue_preview else "Queue is empty"
+        empty_queue_text = "Autoplay picks the next song" if self.model.autoplay != "Off" else "Queue is empty"
+        queue_text = "\n".join(self.model.queue_preview) if self.model.queue_preview else empty_queue_text
         container.add_item(discord.ui.TextDisplay(f"**Up Next**\n{queue_text}"))
 
         if self.model.suggestions or self.register_persistent_controls:
@@ -472,6 +488,14 @@ class PlayerPanelView(discord.ui.LayoutView):
         queue_row.add_item(self.make_button("loop", label="Loop", style=discord.ButtonStyle.secondary, callback=self.loop))
         queue_row.add_item(
             self.make_button("queue", label="Queue", style=discord.ButtonStyle.secondary, callback=self.queue)
+        )
+        queue_row.add_item(
+            self.make_button(
+                "autoplay",
+                label="Autoplay",
+                style=discord.ButtonStyle.success if self.model.autoplay != "Off" else discord.ButtonStyle.secondary,
+                callback=self.autoplay,
+            )
         )
         container.add_item(queue_row)
         self.add_item(container)
@@ -558,8 +582,15 @@ class PlayerPanelView(discord.ui.LayoutView):
         if not player or not player.current:
             await respond(interaction, "Nothing to skip.", ephemeral=True)
             return
-        await player.skip(force=True)
         await acknowledge(interaction)
+        if get_guild_state(player.guild.id).autoplay and not has_next_track(player):
+            # Skipping ends the track as "stopped", which does not trigger autoplay,
+            # so queue the radio pick first and let the skip advance to it.
+            try:
+                await queue_autoplay_track(player, player.current)
+            except Exception:
+                logger.exception("Autoplay could not queue a track before skipping in guild %s", player.guild.id)
+        await player.skip(force=True)
 
     async def stop(self, interaction: discord.Interaction) -> None:
         player = player_for_interaction(interaction)
@@ -623,6 +654,19 @@ class PlayerPanelView(discord.ui.LayoutView):
         player.queue.shuffle()
         await save_player_state(player)
         await acknowledge(interaction)
+        await self.refresh(interaction)
+
+    async def autoplay(self, interaction: discord.Interaction) -> None:
+        player = player_for_interaction(interaction)
+        if not player:
+            await respond(interaction, "Not connected.", ephemeral=True)
+            return
+        state = get_guild_state(self.guild_id_for(interaction))
+        set_autoplay(player.guild.id, not state.autoplay)
+        await save_player_state(player)
+        await acknowledge(interaction)
+        if state.autoplay and not player.current:
+            await queue_autoplay_track(player, last_played_track(player))
         await self.refresh(interaction)
 
     async def loop(self, interaction: discord.Interaction) -> None:

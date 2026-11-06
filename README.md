@@ -17,8 +17,9 @@ Most music bots either post a new message for every track or put basic features 
 
 ## Features
 
-- **One persistent player panel** with buttons for pause, skip, restart, stop, volume, mute, shuffle, loop, and the full queue
-- **Add songs from the panel** with a modal, including a "play next" option, or pick from **suggested next songs**
+- **One persistent player panel** with buttons for pause, skip, restart, stop, volume, mute, shuffle, loop, autoplay, and the full queue
+- **Add songs from the panel** with a modal, including a "play next" option, or pick from **suggested next songs** taken from YouTube Music's radio for what's playing
+- **Autoplay** (off by default) keeps the music going from that radio when the queue runs out, optionally steered by a genre or mood such as `/autoplay 90s french house`
 - **YouTube** links, timestamps (`&t=241s`), playlists, and plain-text search with ranking that prefers the original upload over covers, slowed or sped-up edits, and live versions unless you ask for them
 - **Spotify playlist links**, resolved from public playlist metadata and played through YouTube search (no Spotify audio is streamed)
 - **Survives restarts**: the queue, current track, and playback position are saved under `./data` and restored when the bot comes back
@@ -89,6 +90,7 @@ Join a voice channel and run `/play never gonna give you up`. The player panel a
 | `/join` | Join your voice channel and open the player panel without queueing anything |
 | `/remove <position>` | Remove a track from the queue |
 | `/move <from_pos> <to_pos>` | Move a track to another queue position |
+| `/autoplay [vibe]` | Toggle autoplay, or turn it on steered by a genre or mood. `/autoplay off` turns it off. The panel's **Autoplay** button toggles it too. |
 | `/disconnect` or `/dc` | Leave voice and remove the player panel |
 
 Everything else lives on the panel. **Stop** clears playback and the queue but keeps the bot in voice; use `/dc` to make it leave.
@@ -141,7 +143,7 @@ docker compose up -d
 
 ## Privacy
 
-Adacord stores nothing outside your machine. The bot logs show who requested what (Discord usernames and search queries), and `./data/playback_state.json` keeps requester names for the queue it restores after a restart. Searches go from Lavalink to YouTube, and Spotify playlist links are read from Spotify's public embed page.
+Adacord stores nothing outside your machine. The bot logs show who requested what (Discord usernames and search queries), and `./data/playback_state.json` keeps requester names for the queue it restores after a restart, plus the autoplay setting. Searches go from Lavalink to YouTube, and Spotify playlist links are read from Spotify's public embed page.
 
 ## Troubleshooting
 

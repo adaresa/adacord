@@ -4,12 +4,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from adacord.autoplay import autoplay_label, queue_autoplay_track, set_autoplay
 from adacord.persistence import save_player_state
+from adacord.state import get_guild_state
 from adacord.player import disconnect_player, queue_items
 from adacord.track_requests import TrackRequestLoadError, TrackRequestPlaybackError, queue_track_request
 from adacord.utils import compact_log_value, track_log_label
 from adacord.ui import (
     acknowledge,
+    last_played_track,
     connect_for_interaction,
     create_or_update_display,
     dismiss_saved_playback,
@@ -91,6 +94,26 @@ async def play_impl(interaction: discord.Interaction, query: str) -> None:
     refresh_display_in_background(interaction.guild.id, player)
 
 
+async def autoplay_impl(interaction: discord.Interaction, vibe: str | None) -> None:
+    player = player_for_interaction(interaction)
+    if not player or not interaction.guild:
+        await respond(interaction, "Not connected. Use `/join` or `/play` first.", ephemeral=True)
+        return
+    guild_id = interaction.guild.id
+    vibe = (vibe or "").strip()
+    if vibe.casefold() == "off":
+        set_autoplay(guild_id, False)
+    elif vibe:
+        set_autoplay(guild_id, True, vibe)
+    else:
+        set_autoplay(guild_id, not get_guild_state(guild_id).autoplay)
+    await save_player_state(player)
+    await respond(interaction, f"Autoplay: {autoplay_label(guild_id)}", ephemeral=True)
+    if get_guild_state(guild_id).autoplay and not player.current:
+        await queue_autoplay_track(player, last_played_track(player))
+    await update_display_for_guild(guild_id, player)
+
+
 async def disconnect_impl(interaction: discord.Interaction) -> None:
     player = player_for_interaction(interaction)
     if not player:
@@ -157,6 +180,11 @@ def setup_all_commands(bot: commands.Bot) -> None:
     @app_commands.describe(query="YouTube URL, search terms, or Spotify playlist URL")
     async def play_alias(interaction: discord.Interaction, query: str) -> None:
         await play_impl(interaction, query)
+
+    @bot.tree.command(name="autoplay", description="Keep playing similar songs when the queue runs out")
+    @app_commands.describe(vibe='Optional genre or mood to steer it, e.g. "90s french house". Type "off" to stop.')
+    async def autoplay(interaction: discord.Interaction, vibe: app_commands.Range[str, 1, 100] | None = None) -> None:
+        await autoplay_impl(interaction, vibe)
 
     @bot.tree.command(name="disconnect", description="Disconnect from voice")
     async def disconnect(interaction: discord.Interaction) -> None:

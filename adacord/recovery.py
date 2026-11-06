@@ -91,6 +91,9 @@ async def restore_guild_playback_state(bot: commands.Bot, guild_id: int, saved: 
 
     state = get_guild_state(guild_id)
     state.loop_mode = str(saved.get("loop_mode") or "none")
+    state.autoplay = saved.get("autoplay") is True
+    vibe = saved.get("autoplay_vibe")
+    state.autoplay_vibe = vibe if state.autoplay and isinstance(vibe, str) and vibe else None
 
     display_channel_id = saved.get("display_channel_id")
     if isinstance(display_channel_id, int):

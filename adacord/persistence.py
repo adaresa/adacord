@@ -179,6 +179,8 @@ def player_state_snapshot(
         "display_message_id": display_message_id,
         "volume": player.volume,
         "loop_mode": state.loop_mode,
+        "autoplay": state.autoplay,
+        "autoplay_vibe": state.autoplay_vibe,
         "paused": bool(saved_paused),
         "position": saved_position,
         "current": track_payload(current_track) if current_track else None,

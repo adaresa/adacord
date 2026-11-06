@@ -212,6 +212,7 @@ def test_player_panel_view_is_persistent_v2_with_stable_controls() -> None:
         "adacord:player:shuffle",
         "adacord:player:loop",
         "adacord:player:queue",
+        "adacord:player:autoplay",
         "adacord:player:add",
     }
     assert all(component.get("type") != "embed" for component in view.to_components())

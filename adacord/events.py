@@ -11,6 +11,7 @@ from adacord.persistence import (
     save_player_state,
     saved_playback_for_guild,
 )
+from adacord.autoplay import queue_autoplay_track
 from adacord.player import get_player, has_next_track, play_next
 from adacord.recovery import restore_guild_playback_state
 from adacord.sources import search_lavalink, search_youtube_alternative
@@ -141,6 +142,12 @@ async def handle_track_end(payload: wavelink.TrackEndEventPayload) -> None:
         except Exception:
             # A voice-ready timeout or rejected play must not leave the panel and snapshot stale.
             logger.exception("Could not start next track for guild %s", player.guild.id)
+    elif reason == "finished" and not player.current:
+        # "stopped" comes from Stop and from skips; skips queue their own autoplay pick.
+        try:
+            await queue_autoplay_track(player, ended_track)
+        except Exception:
+            logger.exception("Autoplay could not continue for guild %s", player.guild.id)
     await update_display_for_guild(player.guild.id, player)
     await save_player_state(player)
 
