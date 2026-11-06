@@ -48,6 +48,7 @@ VIBE_SEED_COUNT = 3
 RADIO_ALTERNATE_UPLOADS = 2
 EMPTY_RADIO_CACHE_TTL = 10 * 60
 MIN_ARTIST_NAME_LENGTH = 3
+MAX_SUGGESTIONS_PER_ARTIST = 2
 SUGGESTION_LABEL_NOISE_RE = re.compile(
     r"\s*[\(\[][^\)\]]*\b(?:official|video|audio|lyrics?|visuali[sz]er|hd|hq|4k|mv)\b[^\)\]]*[\)\]]",
     flags=re.IGNORECASE,
@@ -383,25 +384,18 @@ def filter_candidates(
     return originals + variants
 
 
-def diversify(tracks: list[wavelink.Playable], avoid: Sequence[object], count: int) -> list[wavelink.Playable]:
-    """Pick up to `count` tracks, one per artist at first and two once the variety runs out.
+def diversify(tracks: list[wavelink.Playable], count: int) -> list[wavelink.Playable]:
+    """Pick up to `count` tracks in radio order with at most two per artist.
 
-    Tracks sharing an artist with `avoid` (the song playing now, or just
-    played) get one slot fewer, so that artist only returns when nothing else
-    is left.
+    The radio's own mix of artists is kept, including the current one; the cap
+    only stops one artist (often the one playing now) from filling the list.
     """
-    avoid = [track for track in avoid if track is not None]
     selected: list[wavelink.Playable] = []
-    for cap in (1, 2):
-        for track in tracks:
-            if len(selected) >= count:
-                return selected
-            if any(track is chosen for chosen in selected):
-                continue
-            same_artist = sum(1 for chosen in selected if shares_artist(track, chosen))
-            allowed = cap - 1 if any(shares_artist(track, other) for other in avoid) else cap
-            if same_artist >= allowed:
-                continue
+    for track in tracks:
+        if len(selected) >= count:
+            break
+        same_artist = sum(1 for other in selected if shares_artist(track, other))
+        if same_artist < MAX_SUGGESTIONS_PER_ARTIST:
             selected.append(track)
     return selected
 
@@ -443,7 +437,7 @@ def rank_recommendations(
     if player.current:
         existing.append(player.current)
     fresh = filter_candidates(candidates, existing)
-    return as_recommendations(diversify(fresh, [player.current], count))
+    return as_recommendations(diversify(fresh, count))
 
 
 def cache_key_for_player(player: wavelink.Player) -> tuple[int, str] | None:
@@ -587,8 +581,17 @@ async def autoplay_track(
         excluded.append(last_track)
     if player.current:
         excluded.append(player.current)
-    picks = diversify(filter_candidates(candidates, excluded), [*history[-2:], last_track], 1)
-    return picks[0] if picks else None
+    fresh = filter_candidates(candidates, excluded)
+    # Same-artist picks are fine, just not a third song in a row by them.
+    recent: list[object] = []
+    for track in [*history[-2:], last_track]:
+        if track is not None and not any(track is seen for seen in recent):
+            recent.append(track)
+    recent = recent[-2:]
+    for track in fresh:
+        if len(recent) < 2 or not all(shares_artist(track, played) for played in recent):
+            return track
+    return fresh[0] if fresh else None
 
 
 def clear_recommendation_cache() -> None:

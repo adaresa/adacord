@@ -60,7 +60,7 @@ def test_rank_recommendations_diversifies_current_artist() -> None:
 
     ranked = recommendations.rank_recommendations([*same_artist, *other_artist], player, 5)
 
-    assert sum(1 for item in ranked if item.track.author == "MGMT") == 1
+    assert sum(1 for item in ranked if item.track.author == "MGMT") == recommendations.MAX_SUGGESTIONS_PER_ARTIST
     assert any(item.track.author == "Cults" for item in ranked)
     assert any(item.track.author == "Arctic Monkeys" for item in ranked)
 
@@ -280,9 +280,9 @@ async def test_suggestions_come_from_the_current_songs_radio(monkeypatch) -> Non
 
     suggestions = await recommendations.recommendations_for_player(player)
 
-    # The current artist only fills a slot once other artists run out.
-    assert [item.track.author for item in suggestions] == ["Stardust", "Kylie Minogue", "Daft Punk"]
-    assert suggestions[0].label == "Stardust - Music Sounds Better With You"
+    # Radio order is kept, so the current artist can appear alongside others.
+    assert [item.track.author for item in suggestions] == ["Daft Punk", "Stardust", "Kylie Minogue"]
+    assert suggestions[1].label == "Stardust - Music Sounds Better With You"
 
 
 async def test_suggestions_skip_played_queued_and_reuploaded_songs(monkeypatch) -> None:
@@ -375,9 +375,20 @@ async def test_radio_is_cached_per_video(monkeypatch) -> None:
     assert calls == [recommendations.radio_url("AAAAAAAAAAA")]
 
 
-async def test_autoplay_picks_a_fresh_song_by_a_different_artist(monkeypatch) -> None:
+async def test_autoplay_may_repeat_an_artist_once(monkeypatch) -> None:
     last = yt_track("Last", "Artist A", "AAAAAAAAAAA")
     earlier = yt_track("Earlier", "Artist B", "BBBBBBBBBBB")
+    same_artist = yt_track("Another by A", "Artist A", "DDDDDDDDDDD")
+    fake_radios(monkeypatch, {"AAAAAAAAAAA": [last, earlier, same_artist, yt_track("Fresh", "Artist C", "CCCCCCCCCCC")]})
+    player = FakePlayer()
+    player.queue.history.extend([earlier, last])
+
+    assert await recommendations.autoplay_track(player, last) is same_artist
+
+
+async def test_autoplay_avoids_a_third_song_in_a_row_by_one_artist(monkeypatch) -> None:
+    last = yt_track("Last", "Artist A", "AAAAAAAAAAA")
+    earlier = yt_track("Earlier", "Artist A", "BBBBBBBBBBB")
     radio = [
         last,
         earlier,
@@ -422,16 +433,17 @@ async def test_autoplay_returns_none_without_seeds() -> None:
     assert await recommendations.autoplay_track(FakePlayer(), None) is None
 
 
-async def test_fan_reuploads_count_toward_the_current_artist(monkeypatch) -> None:
+async def test_fan_reuploads_count_toward_the_artist_cap(monkeypatch) -> None:
     current = yt_track("Arctic Monkeys - Do I Wanna Know? (Official Video)", "Official Arctic Monkeys", "bpOSxM0rNPM")
+    official = yt_track("Arctic Monkeys - R U Mine?", "Arctic Monkeys", "rrrrrrrrrrr")
     reupload = yt_track("Arctic Monkeys - Knee Socks", "Miguel Bellan", "kkkkkkkkkkk")
     credited_after = yt_track("Why'd you only call me when you're high - Arctic Monkeys", "Carlos", "wwwwwwwwwww")
     other = yt_track("The Neighbourhood - Sweater Weather", "Dan Music", "nnnnnnnnnnn")
-    fake_radios(monkeypatch, {"bpOSxM0rNPM": [reupload, credited_after, other]})
+    fake_radios(monkeypatch, {"bpOSxM0rNPM": [official, reupload, credited_after, other]})
 
     suggestions = await recommendations.recommendations_for_player(FakePlayer(current=current))
 
-    assert suggestions[0].track is other
+    assert [item.track for item in suggestions] == [official, reupload, other]
 
 
 async def test_radio_falls_back_to_another_upload_when_a_video_has_none(monkeypatch) -> None:
