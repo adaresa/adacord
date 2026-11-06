@@ -43,6 +43,15 @@ QUEUE_SEED_WEIGHT = 2.0
 RECENT_HISTORY_LIMIT = 30
 AUTOPLAY_HISTORY_LIMIT = 50
 VIBE_SEED_COUNT = 3
+# Some videos (often official music videos) have no radio. Other uploads of the
+# same song usually do, so try a couple of them before giving up on a seed.
+RADIO_ALTERNATE_UPLOADS = 2
+EMPTY_RADIO_CACHE_TTL = 10 * 60
+MIN_ARTIST_NAME_LENGTH = 3
+SUGGESTION_LABEL_NOISE_RE = re.compile(
+    r"\s*[\(\[][^\)\]]*\b(?:official|video|audio|lyrics?|visuali[sz]er|hd|hq|4k|mv)\b[^\)\]]*[\)\]]",
+    flags=re.IGNORECASE,
+)
 YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 RECOMMENDATION_VARIANT_TERMS = AVOID_TERMS | {
     "acapella",
@@ -96,6 +105,7 @@ recommendation_cache: dict[tuple[int, str], RecommendationCacheEntry] = {}
 recommendation_load_locks: dict[tuple[int, str], asyncio.Lock] = {}
 radio_cache: dict[str, RadioCacheEntry] = {}
 radio_load_locks: dict[str, asyncio.Lock] = {}
+vibe_seed_cache: dict[str, RadioCacheEntry] = {}
 
 
 def track_title(track: object | None) -> str:
@@ -196,8 +206,33 @@ def is_same_song_variant(candidate: object, seed: object) -> bool:
     return overlap >= 0.8
 
 
-def artist_key(track: object) -> str:
-    return display_track_author(track).casefold()
+def artist_names(track: object) -> set[str]:
+    """Names that may credit the artist: the channel, and the part before " - " in the title.
+
+    Fan reuploads credit the real artist only in the title ("Arctic Monkeys -
+    Knee Socks" from a channel called "MP"), so the channel alone is not enough.
+    """
+    names = set()
+    author = re.sub(r"^official\s+", "", display_track_author(track), flags=re.IGNORECASE)
+    title = track_title(track)
+    prefix = title.split(" - ", 1)[0] if " - " in title else ""
+    for name in (author, prefix):
+        words = " ".join(re.findall(r"[a-z0-9]+", name.lower()))
+        if len(words) >= MIN_ARTIST_NAME_LENGTH:
+            names.add(words)
+    return names
+
+
+def track_words_text(track: object) -> str:
+    return " " + " ".join(re.findall(r"[a-z0-9]+", f"{track_author(track)} {track_title(track)}".lower())) + " "
+
+
+def shares_artist(first: object, second: object) -> bool:
+    first_text = track_words_text(first)
+    second_text = track_words_text(second)
+    return any(f" {name} " in second_text for name in artist_names(first)) or any(
+        f" {name} " in first_text for name in artist_names(second)
+    )
 
 
 def youtube_video_id(track: object | None) -> str | None:
@@ -230,7 +265,7 @@ def prune_radio_cache(now: float | None = None) -> None:
 
 
 async def load_radio(video_id: str) -> tuple[wavelink.Playable, ...]:
-    """Load (and cache) the YouTube Music radio for one video."""
+    """Load (and cache) the YouTube Music radio for one video; empty if it has none."""
     now = time.monotonic()
     cached = radio_cache.get(video_id)
     if cached and cached.expires_at > now:
@@ -242,22 +277,41 @@ async def load_radio(video_id: str) -> tuple[wavelink.Playable, ...]:
         cached = radio_cache.get(video_id)
         if cached and cached.expires_at > now:
             return cached.tracks
-        tracks = tuple(await search_lavalink(radio_url(video_id), RECOMMENDATION_REQUESTER))
-        radio_cache[video_id] = RadioCacheEntry(now + RADIO_CACHE_TTL, tracks)
+        try:
+            tracks = tuple(await search_lavalink(radio_url(video_id), RECOMMENDATION_REQUESTER))
+        except Exception as exc:
+            logger.debug("No radio for video %s: %s", video_id, exc)
+            tracks = ()
+        ttl = RADIO_CACHE_TTL if tracks else EMPTY_RADIO_CACHE_TTL
+        radio_cache[video_id] = RadioCacheEntry(now + ttl, tracks)
         prune_radio_cache(now)
         return tracks
 
 
-async def seed_video_id(track: object) -> str | None:
-    """Return a YouTube video to start a radio from, searching for non-YouTube tracks."""
+async def radio_for_seed(track: object) -> tuple[wavelink.Playable, ...]:
+    """Load the radio for a seed, falling back to other uploads of the same song."""
     video_id = youtube_video_id(track)
     if video_id:
-        return video_id
-    query = display_track_title(track)
-    if not query or query == "Unknown track":
-        return None
-    found = await search_lavalink(f"ytsearch:{query}", RECOMMENDATION_REQUESTER, limit=1)
-    return youtube_video_id(found[0]) if found else None
+        tracks = await load_radio(video_id)
+        if tracks:
+            return tracks
+
+    query = format_recommendation_label(track)
+    if query == "Unknown track":
+        return ()
+    found = await search_lavalink(f"ytsearch:{query}", RECOMMENDATION_REQUESTER, limit=RADIO_ALTERNATE_UPLOADS + 1)
+    tried = {video_id}
+    for alternate in found:
+        alternate_id = youtube_video_id(alternate)
+        if alternate_id in tried or alternate_id is None:
+            continue
+        tried.add(alternate_id)
+        tracks = await load_radio(alternate_id)
+        if tracks:
+            return tracks
+        if len(tried) > RADIO_ALTERNATE_UPLOADS + 1:
+            break
+    return ()
 
 
 async def radio_candidates(seeds: Sequence[tuple[object, float]]) -> list[wavelink.Playable]:
@@ -272,8 +326,7 @@ async def radio_candidates(seeds: Sequence[tuple[object, float]]) -> list[waveli
     async def load(seed: object) -> tuple[wavelink.Playable, ...]:
         async with semaphore:
             try:
-                video_id = await seed_video_id(seed)
-                return await load_radio(video_id) if video_id else ()
+                return await radio_for_seed(seed)
             except Exception as exc:
                 logger.debug("Radio for %s failed: %s", track_log_label(seed), exc)
                 return ()
@@ -330,40 +383,35 @@ def filter_candidates(
     return originals + variants
 
 
-def diversify(tracks: list[wavelink.Playable], avoid_artists: Iterable[str], count: int) -> list[wavelink.Playable]:
+def diversify(tracks: list[wavelink.Playable], avoid: Sequence[object], count: int) -> list[wavelink.Playable]:
     """Pick up to `count` tracks, one per artist at first and two once the variety runs out.
 
-    Artists in `avoid_artists` (the one playing now, or just played) get one
-    slot fewer, so they only appear when nothing else is left.
+    Tracks sharing an artist with `avoid` (the song playing now, or just
+    played) get one slot fewer, so that artist only returns when nothing else
+    is left.
     """
-    avoid = {artist for artist in avoid_artists if artist}
+    avoid = [track for track in avoid if track is not None]
     selected: list[wavelink.Playable] = []
-    selected_ids: set[int] = set()
-    artist_counts: dict[str, int] = {}
     for cap in (1, 2):
         for track in tracks:
             if len(selected) >= count:
                 return selected
-            if id(track) in selected_ids:
+            if any(track is chosen for chosen in selected):
                 continue
-            artist = artist_key(track)
-            allowed = cap - 1 if artist in avoid else cap
-            if artist and artist_counts.get(artist, 0) >= allowed:
+            same_artist = sum(1 for chosen in selected if shares_artist(track, chosen))
+            allowed = cap - 1 if any(shares_artist(track, other) for other in avoid) else cap
+            if same_artist >= allowed:
                 continue
             selected.append(track)
-            selected_ids.add(id(track))
-            artist_counts[artist] = artist_counts.get(artist, 0) + 1
     return selected
 
 
 def format_recommendation_label(track: object) -> str:
-    return (display_track_title(track) or track_display_title(track))[:100]
+    label = SUGGESTION_LABEL_NOISE_RE.sub("", display_track_title(track) or track_display_title(track))
+    return re.sub(r"\s+", " ", label).strip(" -")[:100] or "Unknown track"
 
 
 def format_recommendation_description(track: object) -> str | None:
-    author = display_track_author(track)
-    if author and author.casefold() not in display_track_title(track).casefold():
-        return f"Uploaded by {author}"[:100]
     return None
 
 
@@ -395,8 +443,7 @@ def rank_recommendations(
     if player.current:
         existing.append(player.current)
     fresh = filter_candidates(candidates, existing)
-    current_artist = artist_key(player.current) if player.current else ""
-    return as_recommendations(diversify(fresh, [current_artist], count))
+    return as_recommendations(diversify(fresh, [player.current], count))
 
 
 def cache_key_for_player(player: wavelink.Player) -> tuple[int, str] | None:
@@ -482,8 +529,30 @@ async def resolve_recommendation_value(value: str, requester: str) -> wavelink.P
 
 
 async def vibe_seed_tracks(vibe: str) -> list[wavelink.Playable]:
-    found = await search_lavalink(f"ytsearch:{vibe}", AUTOPLAY_REQUESTER)
-    return [track for track in found if youtube_video_id(track) and is_usable_candidate(track)][:VIBE_SEED_COUNT]
+    """Find songs matching a vibe. Genre searches often return hour-long DJ mixes, so skip those."""
+    key = vibe.casefold().strip()
+    now = time.monotonic()
+    cached = vibe_seed_cache.get(key)
+    if cached and cached.expires_at > now:
+        return list(cached.tracks)
+
+    seeds: list[wavelink.Playable] = []
+    for query in (f"ytsearch:{vibe}", f"ytsearch:{vibe} songs"):
+        try:
+            found = await search_lavalink(query, AUTOPLAY_REQUESTER)
+        except Exception as exc:
+            logger.info("Vibe search %r failed: %s", query, exc)
+            continue
+        for track in found:
+            if youtube_video_id(track) and is_usable_candidate(track) and not any(track is seed for seed in seeds):
+                seeds.append(track)
+        if len(seeds) >= VIBE_SEED_COUNT:
+            break
+    seeds = seeds[:VIBE_SEED_COUNT]
+    if len(vibe_seed_cache) >= MAX_RADIO_CACHE_ENTRIES:
+        vibe_seed_cache.clear()
+    vibe_seed_cache[key] = RadioCacheEntry(now + RADIO_CACHE_TTL, tuple(seeds))
+    return seeds
 
 
 async def autoplay_track(
@@ -518,8 +587,7 @@ async def autoplay_track(
         excluded.append(last_track)
     if player.current:
         excluded.append(player.current)
-    recent_artists = [artist_key(track) for track in [*history[-2:], last_track] if track is not None]
-    picks = diversify(filter_candidates(candidates, excluded), recent_artists, 1)
+    picks = diversify(filter_candidates(candidates, excluded), [*history[-2:], last_track], 1)
     return picks[0] if picks else None
 
 
@@ -528,6 +596,7 @@ def clear_recommendation_cache() -> None:
     recommendation_load_locks.clear()
     radio_cache.clear()
     radio_load_locks.clear()
+    vibe_seed_cache.clear()
 
 
 def clear_guild_recommendation_cache(guild_id: int) -> None:

@@ -420,3 +420,36 @@ async def test_autoplay_vibe_seeds_from_a_search(monkeypatch) -> None:
 
 async def test_autoplay_returns_none_without_seeds() -> None:
     assert await recommendations.autoplay_track(FakePlayer(), None) is None
+
+
+async def test_fan_reuploads_count_toward_the_current_artist(monkeypatch) -> None:
+    current = yt_track("Arctic Monkeys - Do I Wanna Know? (Official Video)", "Official Arctic Monkeys", "bpOSxM0rNPM")
+    reupload = yt_track("Arctic Monkeys - Knee Socks", "Miguel Bellan", "kkkkkkkkkkk")
+    credited_after = yt_track("Why'd you only call me when you're high - Arctic Monkeys", "Carlos", "wwwwwwwwwww")
+    other = yt_track("The Neighbourhood - Sweater Weather", "Dan Music", "nnnnnnnnnnn")
+    fake_radios(monkeypatch, {"bpOSxM0rNPM": [reupload, credited_after, other]})
+
+    suggestions = await recommendations.recommendations_for_player(FakePlayer(current=current))
+
+    assert suggestions[0].track is other
+
+
+async def test_radio_falls_back_to_another_upload_when_a_video_has_none(monkeypatch) -> None:
+    current = yt_track("MGMT - Kids (Official HD Video)", "MGMT", "fe4EK4HSPkI")
+    other_upload = yt_track("MGMT - Kids (Lyrics)", "7clouds", "rdKfuwy6LUM")
+    pick = yt_track("Franz Ferdinand - Take Me Out", "Franz Ferdinand", "fffffffffff")
+    fake_radios(
+        monkeypatch,
+        {"rdKfuwy6LUM": [pick]},
+        searches={"ytsearch:MGMT - Kids": [current, other_upload]},
+    )
+
+    suggestions = await recommendations.recommendations_for_player(FakePlayer(current=current))
+
+    assert [item.track for item in suggestions] == [pick]
+
+
+def test_suggestion_labels_drop_upload_decorations() -> None:
+    track = yt_track("Major Lazer & DJ Snake - Lean On (feat. MØ) [Official 4K Music Video]", "Major Lazer", "YqeW9_5kURI")
+
+    assert recommendations.format_recommendation_label(track) == "Major Lazer & DJ Snake - Lean On (feat. MØ)"
